@@ -1,0 +1,61 @@
+MILTER_TARGET = milter
+
+INCLUDE_PATH = ./include
+LIB_DATABASE_PATH = ./libs/database
+LIB_SETTINGS_PATH = ./libs/settings
+SOCKET_PATH = /tmp/f1.sock
+
+FORMAT-STYLE = WebKit
+
+CFLAGS = -std=c99 -Wall -pedantic -Wextra
+
+all: $(MILTER_TARGET)
+
+rebuild: clean all fix-socket
+
+$(MILTER_TARGET): LDLIBS += -pthread
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+%: %.o
+	$(CC) -I$(INCLUDE_PATH) -o $@ $^ -lmilter $(LDLIBS) $(LOADLIBES)
+
+$(MILTER_TARGET) : $(LIB_DATABASE_PATH).o
+$(MILTER_TARGET).o : $(LIB_DATABASE_PATH).h
+$(LIB_DATABASE_PATH).o : $(LIB_DATABASE_PATH).h
+
+$(MILTER_TARGET) : $(LIB_SETTINGS_PATH).o
+$(MILTER_TARGET).o : $(LIB_SETTINGS_PATH).h
+$(LIB_SETTINGS_PATH).o : $(LIB_SETTINGS_PATH).h
+
+$(MILTER_TARGET).o : $(MILTER_TARGET).h
+$(MILTER_TARGET).o : $(MILTER_TARGET).c
+
+clean:
+	$(RM) *.o $(MILTER_TARGET) $(LIB_DATABASE_PATH).o $(LIB_SETTINGS_PATH).o *.cfg *.data
+
+fix-socket:
+	$(RM) $(SOCKET_PATH)
+
+valgrind: rebuild
+	valgrind --verbose --leak-check=full --track-origins=yes --show-leak-kinds=all ./$(MILTER_TARGET) -v
+
+helgrind: rebuild
+	valgrind --tool=helgrind --verbose ./$(MILTER_TARGET) -v
+
+tidy:
+	clang-tidy --use-color -checks=-clang-analyzer-security.* $(LIB_SETTINGS_PATH).c
+	clang-tidy --use-color -checks=-clang-analyzer-security.* $(LIB_DATABASE_PATH).c
+	clang-tidy --use-color -checks=-clang-analyzer-security.* ./$(MILTER_TARGET).c
+
+format:
+	clang-format -style=$(FORMAT-STYLE) -i $(LIB_SETTINGS_PATH).h
+	clang-format -style=$(FORMAT-STYLE) -i $(LIB_SETTINGS_PATH).c
+	clang-format -style=$(FORMAT-STYLE) -i $(LIB_DATABASE_PATH).h
+	clang-format -style=$(FORMAT-STYLE) -i $(LIB_DATABASE_PATH).c
+	clang-format -style=$(FORMAT-STYLE) -i ./$(MILTER_TARGET).c
+	clang-format -style=$(FORMAT-STYLE) -i ./$(MILTER_TARGET).h
+
+
+.PHONY: all clean rebuild fix-socket valgrind format tidy helgrind
