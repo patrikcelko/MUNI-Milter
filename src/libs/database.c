@@ -1,16 +1,32 @@
-/********************************** MUNI - Milter ***********************************
+/*****************************************************************************************
+ * Copyright [2022] [Patrik Čelko]
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this
+ * file except in compliance with the License. You may obtain a copy of the License at
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the specific language governing
+ * permissions and limitations under the License.
+ *
+ *****************************************************************************************/
+
+/********************************** MUNI - Milter *****************************************
  *
  * FILENAME:	database.c
- * DESCRIPTION:	Implementation of the database for milter.
+ * DESCRIPTION:	Implementation of the database for Milter.
  * NOTES:		This lib is part of the MUNI-Milter, and will not work on its own.
  * AUTHOR:		Patrik Čelko
  *
- *************************************************************************************/
+ *****************************************************************************************/
 
 #define _GNU_SOURCE
+#define _POSIX_C_SOURCE
 
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -21,74 +37,20 @@
 
 #include "database.h"
 
-/* Score multipliers */
-static double AUTH_MULTIPLIER = 1.6;
-static double LOCAL_MULTIPLIER = 1.4;
-static double FORWARD_MULTIPLIER = 1.5;
-
 /* Constants */
 static char DATABASE_DELIMITER[] = ",";
 
 /* [Thread-Safe] This function (djb2) was inspired by http://www.cse.yorku.ca/~oz/hash.html */
-unsigned int djb2_hash(const char* ip_string, int table_size)
+unsigned int djb2_hash(const char* key, int table_size)
 {
     unsigned int hash_value = 5381;
     int c;
 
-    while ((c = *ip_string++)) {
+    while ((c = *key++)) {
         hash_value = (hash_value << 5) + hash_value;
         hash_value += !isupper(c) ? c : c + 32;
     }
     return hash_value % table_size;
-}
-
-/* [Thread-Safe] Calculate new scores for the database */
-int db_new_score(int old_score, email_info_t* email_info, settings_t* settings)
-{
-    if (email_info->assassin_score < 0 || old_score < 0) {
-        syslog(LOG_WARNING, "Invalid spam assassin score (%d) or old score value (%d).", email_info->assassin_score, old_score);
-        return 0;
-    }
-
-    int return_score = old_score;
-    double multiplier = 1; // Default
-
-    if (email_info->is_auth) {
-        syslog(LOG_DEBUG, "[db_new_score] User is logged in, we can be more strict (Multiplier: %fx).", AUTH_MULTIPLIER);
-        multiplier *= AUTH_MULTIPLIER;
-    }
-
-    if (email_info->is_forward) {
-        syslog(LOG_DEBUG, "[db_new_score] The mail is forwarded from the MUNI network (Multiplier: %fx).", FORWARD_MULTIPLIER);
-        multiplier *= LOCAL_MULTIPLIER;
-    }
-
-    if (email_info->is_local) {
-        syslog(LOG_DEBUG, "[db_new_score] The email end address is in the MUNI network (Multiplier: %fx).", LOCAL_MULTIPLIER);
-        multiplier *= FORWARD_MULTIPLIER;
-    }
-
-    syslog(LOG_DEBUG, "[db_new_score] Spam assassin score is %d.", email_info->assassin_score);
-
-    if (email_info->assassin_score != 0) {
-        if (email_info->assassin_score <= 5) {
-            return_score += (email_info->assassin_score ^ 2) * multiplier;
-        } else if (email_info->assassin_score <= 10) {
-            return_score += (email_info->assassin_score ^ 2) * 3 * multiplier;
-        } else if (email_info->assassin_score <= 15) {
-            return return_score + (email_info->assassin_score ^ 2) * 7 * multiplier;
-        } else {
-            return return_score + (email_info->assassin_score ^ 2) * 11 * multiplier;
-        }
-    }
-
-    double subtract_value = (100 / settings->clean_interval) * difftime(time(0), email_info->last_email);
-    if (return_score >= settings->soft_score_limit) {
-        subtract_value /= 2;
-    }
-
-    return_score -= subtract_value;
-    return return_score < 0 ? 0 : return_score;
 }
 
 /* [Thread-Unsafe] Construct database structure */
@@ -99,10 +61,17 @@ database_t* db_construct(pthread_mutex_t mutex_value, settings_t* settings)
         return NULL;
     }
 
-    syslog(LOG_DEBUG, "[db_construct] Database initialisation started. Hash table size: %d", settings->hash_table_size);
+    syslog(LOG_DEBUG, "[db_construct] Database initialization started. Hash table size: %d", settings->hash_table_size);
 
     database_t* db_instance = malloc(sizeof(database_t));
+    if (!db_instance) {
+        syslog(LOG_ERR, "Was not able to allocate memory for the database instance.") return NULL;
+    }
+
     db_instance->data = malloc(sizeof(entry_t*) * settings->hash_table_size);
+    if (!db_instance->data) {
+        syslog(LOG_ERR, "Was not able to allocate memory for the database hash table.") return NULL;
+    }
 
     for (int i = 0; i < settings->hash_table_size; i++) {
         db_instance->data[i] = NULL;
@@ -149,7 +118,7 @@ void db_destroy(database_t* db_instance)
         destroy_entry_recursion(db_instance->data[i], &destroy_counter);
 
         if (destroy_counter >= db_instance->entry_counter) {
-            break; // The database is now empty
+            break; // The database should be now empty
         }
     }
 
@@ -159,147 +128,75 @@ void db_destroy(database_t* db_instance)
     syslog(LOG_DEBUG, "[db_destroy] The database was successfully removed from memory.");
 }
 
-/* [Thread-Safe] Recursion function for 'db_set' */
-entry_t* set_entry_recursion(entry_t* entry, char* key, time_t last_email, int score, database_t* db_instance, bool allow_print)
+/* [Thread-Safe] Create a new entry in the database */
+entry_t* create_new_entry(char* key, database_t* db_instance)
 {
+    syslog(LOG_DEBUG, "[create_new_entry] Space was found, creating a record. Key: %s.", key);
+
+    pthread_mutex_lock(&db_instance->mutex_value);
+    entry_t* entry = malloc(sizeof(entry_t));
     if (!entry) {
-        if (allow_print) {
-            syslog(LOG_DEBUG, "[set_entry_recursion] Space was found, creating a record. Key: %s.", key);
-        }
-
-        pthread_mutex_lock(&db_instance->mutex_value);
-        entry_t* temp_entry = malloc(sizeof(entry_t));
-        temp_entry->key = malloc(strlen(key) + 1);
-
-        strcpy(temp_entry->key, key);
-
-        temp_entry->last_email = last_email;
-        temp_entry->score = score;
-
-        db_instance->entry_counter++;
-        pthread_mutex_unlock(&db_instance->mutex_value);
-
-        if (allow_print) {
-            syslog(LOG_DEBUG, "[set_entry_recursion] The record was successfully created. Key: %s.", key);
-        }
-        return temp_entry;
+        syslog(LOG_ERR, "Was not able to allocate memory for entry. Key: %s.", key);
+        return NULL;
     }
 
-    if (entry->key && !strcmp(entry->key, key)) {
-        if (allow_print) {
-            syslog(LOG_DEBUG, "[set_entry_recursion] The record already exists, updating values. Key: %s.", key);
-        }
-
-        pthread_mutex_lock(&db_instance->mutex_value);
-        entry->last_email = last_email;
-        entry->score = score;
-        pthread_mutex_unlock(&db_instance->mutex_value);
-
-        if (allow_print) {
-            syslog(LOG_DEBUG, "[set_entry_recursion] The record was successfully updated. Key: %s.", key);
-        }
-        return entry;
+    entry->key = malloc(strlen(key) + 1);
+    if (!entry->key) {
+        syslog(LOG_ERR, "Was not able to allocate memory for the key value. Key: %s.", key);
+        return NULL;
     }
 
-    entry_t* new_entry = set_entry_recursion(entry->next, key, last_email, score, db_instance, allow_print);
+    strcpy(entry->key, key); // Save the key (address) to our struct
 
-    if (new_entry != entry->next) {
-        pthread_mutex_lock(&db_instance->mutex_value);
-        entry->next = new_entry;
-        pthread_mutex_unlock(&db_instance->mutex_value);
-    }
+    entry->last_email = NULL;
+    entry->email_count = 0;
+    entry->average_time = 0;
+    entry->average_score = 0;
+    entry->next = NULL;
 
+    db_instance->entry_counter++;
+    pthread_mutex_unlock(&db_instance->mutex_value);
+
+    syslog(LOG_DEBUG, "[create_new_entry] The record was successfully created. Key: %s.", key);
     return entry;
 }
 
-/* [Thread-Safe] Set entry in the database but with the option to disable print outputs */
-void db_set_with_print(database_t* db_instance, char* key, time_t last_email, int score, bool allow_print)
-{
-    if (!key || !db_instance) {
-        syslog(LOG_WARNING, "Database setter received invalid key or database instance.");
-        return;
-    }
-
-    unsigned int record_index = djb2_hash(key, db_instance->settings_instance->hash_table_size);
-    if (allow_print) {
-        syslog(LOG_DEBUG, "[db_set] Trying to update or set value for key %s with hash %u.", key, record_index);
-    }
-    entry_t* entry = db_instance->data[record_index];
-
-    if (!entry) {
-        if (allow_print) {
-            syslog(LOG_DEBUG, "[db_set] The Hash bucket was empty creating a new record. Key: %s.", key);
-        }
-        pthread_mutex_lock(&db_instance->mutex_value);
-        db_instance->data[record_index] = malloc(sizeof(entry_t));
-
-        db_instance->data[record_index]->key = malloc(strlen(key) + 1);
-        strcpy(db_instance->data[record_index]->key, key);
-
-        db_instance->data[record_index]->last_email = last_email;
-        db_instance->data[record_index]->score = score;
-        db_instance->data[record_index]->next = NULL;
-
-        db_instance->entry_counter++;
-        pthread_mutex_unlock(&db_instance->mutex_value);
-
-        if (allow_print) {
-            syslog(LOG_DEBUG, "[db_set] The record was successfully created. Key: %s.", key);
-        }
-        return;
-    }
-
-    if (allow_print) {
-        syslog(LOG_DEBUG, "[db_set] The first hash bucket already exists searching for space. Key: %s.", key);
-    }
-
-    entry_t* new_entry = set_entry_recursion(entry, key, last_email, score, db_instance, allow_print);
-    if (new_entry != entry) {
-        pthread_mutex_lock(&db_instance->mutex_value);
-        db_instance->data[record_index] = new_entry;
-        pthread_mutex_unlock(&db_instance->mutex_value);
-    }
-}
-
-/* [Thread-Safe] Set database entry */
-void db_set(database_t* db_instance, char* key, time_t last_email, int score)
-{
-    db_set_with_print(db_instance, key, last_email, score, true); // Allow print
-}
-
 /* [Thread-Safe] Recursion function for 'db_get' */
-entry_t* get_entry_recursion(entry_t* entry, char* ip_to_search)
+entry_t* get_entry_recursion(entry_t* entry, char* addr_to_search)
 {
-    if (!strcmp(entry->key, ip_to_search)) {
-        syslog(LOG_DEBUG, "[get_entry_recursion] Record for key %s was successfully found.", ip_to_search);
+    if (!strcmp(entry->key, addr_to_search)) {
+        syslog(LOG_DEBUG, "[get_entry_recursion] The record for key %s was successfully found.", addr_to_search);
         return entry;
     }
 
     if (entry->next) {
-        return get_entry_recursion(entry->next, ip_to_search);
+        return get_entry_recursion(entry->next, addr_to_search);
     }
 
-    syslog(LOG_DEBUG, "[get_entry_recursion] Was not able to find key %s (out of buckets).", ip_to_search);
-    return NULL;
+    syslog(LOG_DEBUG, "[get_entry_recursion] Was not able to find key %s (out of buckets).", addr_to_search);
+
+    entry->next = create_new_entry(addr_to_search, db_instance);
+    return entry->next;
 }
 
-/* [Thread-Safe] Get entry from database */
-entry_t* db_get(database_t* db_instance, char* ip_to_search)
+/* [Thread-Safe] Get an entry from the database (if does not exist create a new one) */
+entry_t* db_get(database_t* db_instance, char* addr_to_search)
 {
-    if (!ip_to_search || !db_instance) {
+    if (!addr_to_search || !db_instance) {
         syslog(LOG_WARNING, "Database getter received invalid key or database instance.");
         return NULL;
     }
 
-    unsigned int record_index = djb2_hash(ip_to_search, db_instance->settings_instance->hash_table_size);
-    syslog(LOG_DEBUG, "[db_get] Starting to search for key %s with hash %u.", ip_to_search, record_index);
+    unsigned int record_index = djb2_hash(addr_to_search, db_instance->settings_instance->hash_table_size);
+    syslog(LOG_DEBUG, "[db_get] Starting to search for key %s with hash %u.", addr_to_search, record_index);
 
     entry_t* entry = db_instance->data[record_index];
     if (!entry) {
-        syslog(LOG_DEBUG, "[db_get] Record for key %s does not exist (first bucket does not exist).", ip_to_search);
-        return NULL;
+        syslog(LOG_DEBUG, "[db_get] The record for key %s does not exist (the first bucket does not exist).", addr_to_search);
+        entry = create_new_entry(addr_to_search, db_instance);
+        return entry;
     }
-    return get_entry_recursion(entry, ip_to_search);
+    return get_entry_recursion(entry, addr_to_search);
 }
 
 /* [Thread-Unsafe] Recursion function for 'db_save_recusrion' */
@@ -309,20 +206,13 @@ void db_save_recusrion(entry_t* entry, int* saved_lines, FILE* db_save_fd, setti
         return;
     }
 
-    email_info_t temp_email_info = {
-        0,
-        entry->last_email,
-        false,
-        false,
-        false
-    };
-
-    int new_score = db_new_score(entry->score, &temp_email_info, settings);
-
-    if (new_score > 0) {
-        fprintf(db_save_fd, "%s%s%d\n", entry->key, DATABASE_DELIMITER, new_score);
+    // Save only records that are not too old
+    if (fabs((float)difftime(time(0), entry->last_email)) < settings->max_save_time) {
+        fprintf(db_save_fd, "%s%s%d%s%.4f%s%.2f\n", entry->key, DATABASE_DELIMITER, entry->email_count,
+            DATABASE_DELIMITER, entry->average_time, DATABASE_DELIMITER, entry->average_score);
         (*saved_lines)++;
     }
+
     db_save_recusrion(entry->next, saved_lines, db_save_fd, settings);
 }
 
@@ -364,11 +254,11 @@ void db_save(database_t* db_instance)
 
     syslog(LOG_INFO, "The database was successfully saved to: %s. Saved lines: %d.", path, saved_lines);
     if (db_instance->entry_counter != saved_lines) {
-        syslog(LOG_WARNING, "There was a problem during saving the database to file. Saved: %d/%d.", saved_lines, db_instance->entry_counter);
+        syslog(LOG_WARNING, "There was a problem during saving the database to the file. Saved: %d/%d.", saved_lines, db_instance->entry_counter);
     }
 }
 
-/* [Thread-Unsafe] Load database from local path */
+/* [Thread-Unsafe] Load database from local path/file */
 void db_load(database_t* db_instance)
 {
     if (!db_instance || !db_instance->settings_instance) {
@@ -391,9 +281,11 @@ void db_load(database_t* db_instance)
 
     while (getline(&line_content, &data_length, db_load_fd) != EOF) {
         char* key = strtok(line_content, DATABASE_DELIMITER);
-        char* raw_score = strtok(NULL, DATABASE_DELIMITER);
+        char* raw_email_count = strtok(NULL, DATABASE_DELIMITER);
+        char* raw_average_time = strtok(NULL, DATABASE_DELIMITER);
+        char* raw_average_score = strtok(NULL, DATABASE_DELIMITER);
 
-        if (!key || !raw_score) {
+        if (!key || !email_count || !average_time || !average_score) {
             continue; // Invalid line in saved database, skipping (missing part)
         }
 
@@ -403,16 +295,34 @@ void db_load(database_t* db_instance)
         }
 
         loaded_counter++;
-
         errno = 0;
-        char* end_ptr;
-        int score = strtol(raw_score, &end_ptr, 10);
 
-        if (errno != 0 || end_ptr == raw_score) {
-            syslog(LOG_WARNING, "Was not able to load the score from the saved database key: %s. Skipping.", key);
-            continue; // Invalid line in database, skipping (parse int problem)
+        // Parse email_count as integer
+        char* email_count_end;
+        int email_count = strtol(raw_email_count, &email_count_end, 10);
+
+        // Parse average_time as float
+        char* average_time_end;
+        int average_time = strtof(raw_average_time, &average_time_end);
+
+        // Parse average_score as float
+        char* average_score_end;
+        int average_score = strtof(raw_average_score, &average_score_end);
+
+        if (errno != 0 || email_count_end == raw_email_count || average_time_end == raw_average_time || average_score_end == raw_average_score) {
+            syslog(LOG_WARNING, "Was not able to load the email_conut, average_time, or average_score from the saved database key: %s. Skipping.", key);
+            continue; // Invalid line in database, skipping (parsing error)
         }
-        db_set_with_print(db_instance, key, time(0), score, false);
+
+        entry_t* entry = db_get(db_instance, key);
+        if (!entry) {
+            syslog(LOG_WARNING, "Was not able to get an entry for %s, during loading from file.", key);
+        }
+
+        entry->last_email = time(0);
+        entry->email_count = email_count;
+        entry->average_time = average_time;
+        entry->average_score = average_score;
     }
 
     if (line_content) {
@@ -427,7 +337,7 @@ void db_load(database_t* db_instance)
     syslog(LOG_DEBUG, "[db_load] The database was successfully loaded. Loaded: %d.", loaded_counter);
     db_instance->entry_counter = loaded_counter;
 
-    syslog(LOG_DEBUG, "[db_load] Removing old database file.");
+    syslog(LOG_DEBUG, "[db_load] Removing old database files.");
     if (remove(path) == -1) {
         syslog(LOG_WARNING, "Was not able to remove the old database file. Path: %s.", path);
     }
@@ -444,48 +354,22 @@ void db_cleanup_recursion(entry_t* entry, entry_t* prev_entry, database_t* db_in
     (*actual_counter)++;
     pthread_mutex_unlock(&db_instance->mutex_value);
 
-    if (difftime(entry->last_email, time(0)) <= db_instance->settings_instance->clean_interval) {
+    if (fabs((float)difftime(entry->last_email), time(0)) < db_instance->settings_instance->max_save_time) {
         db_cleanup_recursion(entry->next, entry, db_instance, record_index, actual_counter);
         return;
     }
 
-    email_info_t temp_email_info = {
-        0,
-        entry->last_email,
-        false,
-        false,
-        false
-    };
+    pthread_mutex_lock(&db_instance->mutex_value);
+    free(entry->key);
 
-    int new_score = db_new_score(entry->score, &temp_email_info, db_instance->settings_instance);
-    if (new_score <= 0) {
-        if (entry->next) {
-            db_cleanup_recursion(entry->next, entry, db_instance, record_index, actual_counter);
-        }
+    db_instance->entry_counter--;
+    entry_t* tmp_prev_entry = !prev_entry ? db_instance->data[record_index] : prev_entry->next;
+    tmp_prev_entry = entry->next
 
-        pthread_mutex_lock(&db_instance->mutex_value);
-        db_instance->entry_counter--;
-        pthread_mutex_unlock(&db_instance->mutex_value);
+                         free(entry);
+    pthread_mutex_unlock(&db_instance->mutex_value);
 
-        free(entry->key);
-
-        pthread_mutex_lock(&db_instance->mutex_value);
-        if (!prev_entry) {
-            db_instance->data[record_index] = entry->next;
-        } else {
-            prev_entry->next = entry->next;
-        }
-        pthread_mutex_unlock(&db_instance->mutex_value);
-
-        free(entry);
-    } else {
-        pthread_mutex_lock(&db_instance->mutex_value);
-        entry->last_email = time(0);
-        entry->score = new_score;
-        pthread_mutex_unlock(&db_instance->mutex_value);
-
-        db_cleanup_recursion(entry->next, entry, db_instance, record_index, actual_counter);
-    }
+    db_cleanup_recursion(tmp_prev_entry, !prev_entry ? db_instance->data[record_index] : prev_entry, db_instance, record_index, actual_counter);
 }
 
 /* [Thread-Safe] Cleanup thread */
@@ -525,8 +409,8 @@ void db_cleanup(database_t* db_instance)
         return;
     }
 
-    int time_diff = difftime(time(0), db_instance->last_clean);
-    syslog(LOG_DEBUG, "Time after the last cleanup: %d (seconds).", time_diff);
+    float time_diff = fabs((float)difftime(time(0), db_instance->last_clean));
+    syslog(LOG_DEBUG, "[db_cleanup] Time after the last cleanup: %d (seconds).", time_diff);
 
     if (time_diff <= db_instance->settings_instance->clean_interval) {
         return; // The time difference for cleanup is still under the limit
