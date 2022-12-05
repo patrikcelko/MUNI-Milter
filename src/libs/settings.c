@@ -1,13 +1,28 @@
-/********************************** MUNI - Milter ***********************************
+/*****************************************************************************************
+ * Copyright [2022] [Patrik Čelko]
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this
+ * file except in compliance with the License. You may obtain a copy of the License at
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the specific language governing
+ * permissions and limitations under the License.
+ *
+ *****************************************************************************************/
+
+/********************************** MUNI - Milter ****************************************
  *
  * FILENAME:	settings.c
- * DESCRIPTION:	Implementation of the config parser for milter.
+ * DESCRIPTION:	Implementation of the config parser for Milter.
  * NOTES:		This lib is part of the MUNI-Milter, and will not work on its own.
  * AUTHOR:		Patrik Čelko
  *
- *************************************************************************************/
+ *****************************************************************************************/
 
 #define _GNU_SOURCE
+#define _POSIX_C_SOURCE
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -28,48 +43,54 @@
 static char DEFAULT_PATH[] = "./config.cfg";
 static char CONFIG_DELIMITER[] = "=";
 static char LIST_DELIMITER = ';';
-static int AMOUNT_OF_CONFIG_LINES = 15;
+static int AMOUNT_OF_CONFIG_LINES = 18;
 
 /* [Thread-Safe] Fill the newly created config file with default values */
 void fill_empty_config(FILE* config_fd)
 {
     fprintf(config_fd, "\
-## Limit how many times an email pass relay. DEFAULT: 50\n\
-forward_counter_limit=50\n\
-## During milter exit print milter statistics (how many emails was parsed/banned). DEFAULT: true\n\
-allow_statistics=true\n\
-## Run milter, but do not make any change during a run. DEFAULT: false\n\
+## Run Milter, but do not make any changes during a run. DEFAULT: false\n\
 dry_run=false\n\
-## Save database to external file after exit. DEFAULT: true\n\
+## Save the whole database to an external file after the exit call. DEFAULT: true\n\
 save_database=true\n\
-## Interval after which will be automatically removed the record from the database. DEFAULT: 600 | 5 min.\n\
-clean_interval=600\n\
-## Limit for marking email as super-spam. DEFAULT: 15\n\
-super_spam_limit=15\n\
-## Limit for marking email as basic spam. DEFAULT: 10\n\
-basic_spam_limit=10\n\
+## The path where should be stored database. Used when 'save_database' is allowed. DEFAULT: ./db.data\n\
+database_path=./db.data\n\
+## The hard limit for the average spam score to be marked as super-spam. DEFAULT: 20\n\
+super_spam_limit=20\n\
+## The hard limit for the average spam score to be marked as spam. DEFAULT: 12\n\
+spam_limit=12\n\
 ## How much info should milter print? DEFAULT: 0 | MAX: 6\n\
 milter_debug_level=0\n\
-## Size of the hash table where will be stored statistics about emails. DEFAULT: 2000000\n\
+## Size of the hash table where will be stored data about emails. DEFAULT: 2000000\n\
 hash_table_size=200000\n\
-## The path where should be stored statistic database. Used when 'save_database' is allowed. DEFAULT: ./db.data\n\
-database_path=./db.data\n\
-## The path where should be stored socket for communication with sendmail. DEFAULT: local:/tmp/f1.sock\n\
+## Interval after which will be automatically removed the record from the database. DEFAULT: 2400 | 20 min.\n\
+clean_interval=2400\n\
+## The time after which the record in the database expires. DEFAULT: 600 | 5 min.\n\
+max_save_time=600\n\
+# How much percent can the difference between the faculty average time and the sender's average which will be categorized as spam? DEFAULT: 50 (%)\n\
+time_percentage_spam=5\n\
+# How much percent can the difference between the faculty average time and the sender's average which will be categorized as super-spam? DEFAULT: 75 (%)\n\
+time_percentage_super_spam=75\n\
+## After how much percent above faculty average should be sender marked to the category spam? DEFAULT: 15 (%)\n\
+score_percentage_spam=15\n\
+## After how much percent above faculty average should be sender marked to the category super-spam? DEFAULT: 30 (%)\n\
+score_percentage_super_spam=15\n\
+## Limit how many times can email pass relay. DEFAULT: 20\n\
+forward_counter_limit=20\n\
+## After how much percent above the relay average should forward blocked? DEFAULT: 15 (%)
+forward_percentage_limit=15\n\
+## The path where should be stored socket for communication with Sendmail (Do not use the default one). DEFAULT: local:/tmp/f1.sock\n\
 socket_path=local:/tmp/f1.sock\n\
-## Limit after which will email always be rejected (send to quarantine). DEFAULT: 420\n\
-hard_score_limit=420\n\
-## Limit after which will record in the database be saved for two times longer. DEFAULT: 250\n\
-soft_score_limit=250\n\
-## List of blacklisted IP/DNS separated by semicolumn. EXAMPLE: localhost;192.168.0.1;muni.cz\n\
+## List of blacklisted IP/DNS/emails separated by semicolumn. EXAMPLE: localhost;192.168.0.1;muni.cz;patrik@celko.cz\n\
 blacklist=\n\
-## List of whitelisted IP/DNS separated by semicolumn. EXAMPLE: localhost;192.168.0.1;muni.cz\n\
+## List of whitelisted IP/DNS/emails separated by semicolumn. EXAMPLE: localhost;192.168.0.1;muni.cz;patrik@celko.cz\n\
 whitelist=\n");
 }
 
-/* [Thread-Safe] Get config file descriptor, if does not exist create a new one with default values */
+/* [Thread-Safe] Get config file descriptor, if the file does not exist create a new one with default values */
 FILE* get_config_fd(char* config_path)
 {
-    syslog(LOG_DEBUG, "[get_config_fd] Trying to open config file descriptor.");
+    syslog(LOG_DEBUG, "[get_config_fd] Trying to open the config file descriptor.");
     char* temp_path = !config_path ? DEFAULT_PATH : config_path;
     struct stat temp_buffer;
 
@@ -100,7 +121,7 @@ FILE* get_config_fd(char* config_path)
     return fopen(temp_path, "r");
 }
 
-/* [Thread-Safe] Verify that the loaded config has correct values */
+/* [Thread-Safe] Verify that the loaded config has the correct values */
 bool verify_settings_integrity(settings_t* settings, int assign_counter)
 {
     syslog(LOG_DEBUG, "[verify_settings_integrity] Starting to verify settings integrity. (Loaded: %d/%d)", assign_counter, AMOUNT_OF_CONFIG_LINES);
@@ -115,13 +136,37 @@ bool verify_settings_integrity(settings_t* settings, int assign_counter)
         return false;
     }
 
+    if (settings->time_percentage_spam <= 0 || settings->time_percentage_super_spam <= 0 || settings->score_percentage_spam <= 0 || settings->score_percentage_super_spam <= 0) {
+        syslog(LOG_ERR, "Percentage limits must be a positive integer. Now: Time -> (%.0f | %.0f) & Spam -> (%.0f | %.0f)",
+            settings->time_percentage_spam * 100, settings->time_percentage_super_spam * 100, settings->score_percentage_spam * 100,
+            settings->score_percentage_super_spam * 100);
+        return false
+    }
+
+    if (settings->time_percentage_spam >= settings->time_percentage_super_spam || settings->score_percentage_spam >= settings->score_percentage_super_spam) {
+        syslog(LOG_ERR, "The percentage for super-spam must be bigger than spam. Now: Time -> (%.0f | %.0f) & Spam -> (%.0f | %.0f)",
+            settings->time_percentage_spam * 100, settings->time_percentage_super_spam * 100, settings->score_percentage_spam * 100,
+            settings->score_percentage_super_spam * 100);
+        return false
+    }
+
+    if (settings->forward_percentage_limit <= 0) {
+        syslog(LOG_ERR, "The forward percentage limit must be a positive integer. Now: %.0f.", settings->forward_percentage_limit * 100);
+        return false;
+    }
+
     if (settings->forward_counter_limit <= 0) {
         syslog(LOG_ERR, "The forward counter limit must be a positive integer. Now: %d.", settings->forward_counter_limit);
         return false;
     }
 
-    if (settings->super_spam_limit <= 0 || settings->basic_spam_limit <= 0) {
-        syslog(LOG_ERR, "The super-spam limit and basic spam limit should be a positive integer. Now: %d & %d.", settings->super_spam_limit, settings->basic_spam_limit);
+    if (settings->super_spam_limit <= 0 || settings->spam_limit <= 0) {
+        syslog(LOG_ERR, "The super-spam limit and the spam limit should be positive integers. Now: %d & %d.", settings->super_spam_limit, settings->spam_limit);
+        return false;
+    }
+
+    if (settings->super_spam_limit <= settings->spam_limit) {
+        syslog(LOG_ERR, "The super-spam limit must be bigger than the spam limit. Now: %d & %d.", settings->super_spam_limit, settings->spam_limit);
         return false;
     }
 
@@ -135,13 +180,13 @@ bool verify_settings_integrity(settings_t* settings, int assign_counter)
         return false;
     }
 
-    if (settings->soft_score_limit <= 0 || settings->hard_score_limit <= 0) {
-        syslog(LOG_ERR, "The soft and hard score limits must be a positive integer. Now: %d - %d.", settings->soft_score_limit, settings->hard_score_limit);
+    if (settings->forward_counter_limit <= 1) {
+        syslog(LOG_ERR, "The forward counter limit must be a positive integer bigger than 1. Now: %d.", settings->forward_counter_limit);
         return false;
     }
 
-    if (settings->soft_score_limit >= settings->hard_score_limit) {
-        syslog(LOG_ERR, "The hard score limit must be greater than the soft score limit. Now: %d !> %d.", settings->soft_score_limit, settings->hard_score_limit);
+    if (settings->max_save_time <= 0) {
+        syslog(LOG_ERR, "The maximally save time for records in DB must be a positive integer. Now: %d.", settings->max_save_time);
         return false;
     }
 
@@ -151,7 +196,7 @@ bool verify_settings_integrity(settings_t* settings, int assign_counter)
     }
 
     if (settings->hash_table_size <= 0) {
-        syslog(LOG_ERR, "Hash table size should be a positive integer. Now: %d.", settings->hash_table_size);
+        syslog(LOG_ERR, "The hash table size should be a positive integer. Now: %d.", settings->hash_table_size);
         return false;
     }
 
@@ -163,7 +208,7 @@ bool verify_settings_integrity(settings_t* settings, int assign_counter)
         for (int i_white = 0; i_white <= settings->whitelist_len; i_white++) {
             for (int i_black = 0; i_black <= settings->blacklist_len; i_black++) {
                 if (!strcmp(settings->whitelist[i_white], settings->blacklist[i_black])) {
-                    syslog(LOG_ERR, "IP %s was found in the white-list, but also in the black-list. This is unwanted behaviour.", settings->blacklist[i_black]);
+                    syslog(LOG_ERR, "Address %s was found in the whitelist, but also the blacklist. This is unwanted behavior.", settings->blacklist[i_black]);
                     return false;
                 }
             }
@@ -195,13 +240,13 @@ void remove_white_space(char* string_value)
     }
 }
 
-/* [Thread-Unsafe] Parse IP/DNS lists to more suitable representation */
+/* [Thread-Unsafe] Parse IP/DNS/email lists to more suitable representation */
 char** parse_list_value(char* value, char* list_name, int* list_len)
 {
-    *list_len = 0; // Default/Empty value
+    *list_len = 0;
 
     if (!value) {
-        syslog(LOG_DEBUG, "[parse_list_value] There is no IP/DNS in %s. Skipping.", list_name);
+        syslog(LOG_DEBUG, "[parse_list_value] There is no IP/DNS/email in %s. Skipping.", list_name);
         return NULL;
     }
 
@@ -219,6 +264,11 @@ char** parse_list_value(char* value, char* list_name, int* list_len)
     syslog(LOG_DEBUG, "[parse_list_value] Found %d IP/DNS in %s, allocating memory blocks.", to_allocate_blocks, list_name);
 
     char** list = malloc(sizeof(char*) * to_allocate_blocks);
+    if (!list) {
+        syslog(LOG_ERR, "Was not abel to allocate memory for %s.", list_name);
+        return NULL;
+    }
+
     char delimiter_as_string[2] = "\0";
     delimiter_as_string[0] = LIST_DELIMITER;
     char* pointer = strtok(value, delimiter_as_string);
@@ -226,7 +276,7 @@ char** parse_list_value(char* value, char* list_name, int* list_len)
 
     while (pointer) {
         list[counter] = strdup(pointer);
-        syslog(LOG_DEBUG, "[parse_list_value] IP %s was saved to %s.", list[counter], list_name);
+        syslog(LOG_DEBUG, "[parse_list_value] Address %s was saved to %s.", list[counter], list_name);
         counter++;
         pointer = strtok(NULL, delimiter_as_string);
     }
@@ -235,7 +285,21 @@ char** parse_list_value(char* value, char* list_name, int* list_len)
     return list;
 }
 
-/* [Thread-Safe] Get int value from string, if invalid returns -1 */
+/* [Thread-Safe] Get float value from string, if invalid returns -1.0 */
+float parse_float_value(char* value, char* key)
+{
+    errno = 0;
+    char* end_ptr;
+    float temp_number = (float)strtof(value, &end_ptr);
+
+    if (errno || end_ptr == value) {
+        syslog(LOG_ERR, "Was not able to parse float value for the key %s.", key);
+        return -1;
+    }
+    return temp_number;
+}
+
+/* [Thread-Safe] Get integer value from string, if invalid returns -1 */
 int parse_number_value(char* value, char* key)
 {
     errno = 0;
@@ -255,7 +319,7 @@ bool parse_bool_value(char* value)
     return !strcmp(value, "true");
 }
 
-/* [Thread-Unsafe] Initialise settings structure */
+/* [Thread-Unsafe] Initialize settings structure */
 settings_t* settings_init(char* config_path)
 {
     FILE* config_fd = get_config_fd(config_path);
@@ -265,27 +329,34 @@ settings_t* settings_init(char* config_path)
     }
 
     settings_t* settings = malloc(sizeof(settings_t));
+    if (!settings) {
+        syslog(LOG_ERR, "Was not able to allocate memory for settings structure.");
+        return NULL;
+    }
+
     char* line_content = NULL;
     size_t data_length;
 
-    syslog(LOG_DEBUG, "[settings_init] The file descriptor for config was successfully created.");
+    syslog(LOG_DEBUG, "[settings_init] The file descriptor for the config was successfully created.");
 
-    // Setting as "empty" values
-    settings->forward_counter_limit = 0;
     settings->dry_run = false;
-    settings->allow_statistics = false;
     settings->save_database = false;
+    settings->database_path = NULL;
     settings->super_spam_limit = 0;
-    settings->basic_spam_limit = 0;
+    settings->spam_limit = 0;
     settings->milter_debug_level = 0;
     settings->hash_table_size = 0;
-    settings->database_path = NULL;
+    settings->clean_interval = 0;
+    settings->max_save_time = 0;
+    settings->time_percentage_spam = 0;
+    settings->time_percentage_super_spam = 0;
+    settings->score_percentage_spam = 0;
+    settings->score_percentage_super_spam = 0;
+    settings->forward_counter_limit = 0;
+    settings->forward_percentage_limit = 0;
     settings->socket_path = NULL;
     settings->blacklist = NULL;
     settings->whitelist = NULL;
-    settings->clean_interval = 0;
-    settings->soft_score_limit = 0;
-    settings->hard_score_limit = 0;
     settings->blacklist_len = 0;
     settings->whitelist_len = 0;
 
@@ -305,12 +376,18 @@ settings_t* settings_init(char* config_path)
 
         syslog(LOG_DEBUG, "[settings_init] Key %s was found in the config with value %s.", key, value);
 
-        if (!strcmp(key, "allow_statistics")) {
-            settings->allow_statistics = parse_bool_value(value);
-        } else if (!strcmp(key, "hard_score_limit")) {
-            settings->hard_score_limit = parse_number_value(value, key);
-        } else if (!strcmp(key, "soft_score_limit")) {
-            settings->soft_score_limit = parse_number_value(value, key);
+        if (!strcmp(key, "score_percentage_super_spam")) {
+            settings->score_percentage_super_spam = parse_float_value(value) / 100;
+        } else if (!strcmp(key, "score_percentage_spam")) {
+            settings->score_percentage_spam = parse_float_value(value) / 100;
+        } else if (!strcmp(key, "time_percentage_super_spam")) {
+            settings->time_percentage_super_spam = parse_float_value(value) / 100;
+        } else if (!strcmp(key, "time_percentage_spam")) {
+            settings->time_percentage_spam = parse_float_value(value) / 100;
+        } else if (!strcmp(key, "max_save_time")) {
+            settings->max_save_time = parse_number_value(value, key);
+        } else if (!strcmp(key, "forward_percentage_limit")) {
+            settings->forward_percentage_limit = parse_float_value(value, key) / 100;
         } else if (!strcmp(key, "clean_interval")) {
             settings->clean_interval = parse_number_value(value, key);
         } else if (!strcmp(key, "forward_counter_limit")) {
@@ -321,8 +398,8 @@ settings_t* settings_init(char* config_path)
             settings->save_database = parse_bool_value(value);
         } else if (!strcmp(key, "super_spam_limit")) {
             settings->super_spam_limit = parse_number_value(value, key);
-        } else if (!strcmp(key, "basic_spam_limit")) {
-            settings->basic_spam_limit = parse_number_value(value, key);
+        } else if (!strcmp(key, "spam_limit")) {
+            settings->spam_limit = parse_number_value(value, key);
         } else if (!strcmp(key, "milter_debug_level")) {
             settings->milter_debug_level = parse_number_value(value, key);
         } else if (!strcmp(key, "hash_table_size")) {
@@ -336,7 +413,7 @@ settings_t* settings_init(char* config_path)
         } else if (!strcmp(key, "whitelist")) {
             settings->whitelist = parse_list_value(value, "whitelist", &(settings->whitelist_len));
         } else {
-            syslog(LOG_WARNING, "Found unknown key in the config file: %s. Skipping.", key);
+            syslog(LOG_WARNING, "Found an unknown key in the config file: %s. Skipping.", key);
             continue;
         }
         assign_counter++;
@@ -348,7 +425,7 @@ settings_t* settings_init(char* config_path)
 
     errno = 0;
     if (fclose(config_fd) == EBADF || errno) {
-        syslog(LOG_WARNING, "Was not able to close the file descriptor after settings initialisation. Skipping.");
+        syslog(LOG_WARNING, "Was not able to close the file descriptor after settings initialization. Skipping.");
     }
 
     syslog(LOG_DEBUG, "[settings_init] Config parsing was successful.");
@@ -356,7 +433,7 @@ settings_t* settings_init(char* config_path)
         return settings;
     }
 
-    syslog(LOG_DEBUG, "[settings_init] Settings initialisation failed cleaning resources.");
+    syslog(LOG_DEBUG, "[settings_init] Settings initialization failed, cleaning resources.");
     settings_destroy(settings);
     return NULL;
 }
@@ -401,7 +478,7 @@ char* IP_from_DNS(char* dns_name)
     };
 
     if (getaddrinfo(dns_name, NULL, &hints, &server_info) != 0) {
-        syslog(LOG_DEBUG, "[IP_from_DNS] Was not able to get address info. DNS: %s.", dns_name);
+        syslog(LOG_DEBUG, "[IP_from_DNS] Was not able to get the address info. DNS: %s.", dns_name);
         return NULL;
     }
 
@@ -459,26 +536,40 @@ bool contains_subaddress(char* address_A, char* address_B)
     return !strcmp(address_B, end_pointer);
 }
 
+/* [Thread-Safe] Compare the email DNS part if matches with the domain in the whitelist/blacklist */
+bool cmp_email_dns(char* address, char* domain)
+{
+    strtok(st, "@"); // User part, which can we just ignore
+    char* email_domain_part = strtok(NULL, "@");
+    char* other = strtok(NULL, "@");
+
+    if (other || !domain_part) {
+        return false; // Invalid email
+    }
+
+    return contains_subaddress(email_domain_part, domain);
+}
+
 /* [Thread-Safe] Abstraction for functions 'is_whitelisted' and 'is_blacklisted' */
 bool contains_address(char* address, int array_length, char** array, char* array_name)
 {
-    syslog(LOG_DEBUG, "[check_if_array_contains] Checking if IP or DNS %s is in %s", address, array_name);
+    syslog(LOG_DEBUG, "[check_if_array_contains] Checking if IP/DNS/email %s is in %s", address, array_name);
     for (int i = 0; i < array_length; i++) {
-        if (!strcmp(address, array[i]) || contains_subaddress(address, array[i])) {
-            syslog(LOG_DEBUG, "[check_if_array_contains] IP/DNS %s was found in %s.", address, array_name);
+        if (!strcmp(address, array[i]) || contains_subaddress(address, array[i]) || cmp_email_dns(address, array[i])) {
+            syslog(LOG_DEBUG, "[check_if_array_contains] IP/DNS/email %s was found in %s.", address, array_name);
             return true;
         }
     }
     return false;
 }
 
-/* [Thread-Safe] Check if IP is in the whitelist */
+/* [Thread-Safe] Check if the address is on the whitelist */
 bool is_whitelisted(char* address, settings_t* settings)
 {
     return contains_address(address, settings->whitelist_len, settings->whitelist, "whitelist");
 }
 
-/* [Thread-Safe] Check if IP is in the blacklist */
+/* [Thread-Safe] Check if the address is on the blacklist */
 bool is_blacklisted(char* address, settings_t* settings)
 {
     return contains_address(address, settings->blacklist_len, settings->blacklist, "blacklist");

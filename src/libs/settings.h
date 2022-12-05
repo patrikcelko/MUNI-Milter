@@ -28,19 +28,19 @@
 struct settings {
     bool dry_run; // DEFAULT: false
     bool save_database; // DEFAULT: true
-    int forward_counter_limit; // DEFAULT: 20
-    int super_spam_limit; // DEFAULT: 15
-    int spam_limit; // DEFAULT: 10
+    char* database_path; // DEFAULT: ./db.data
+    int super_spam_limit; // DEFAULT: 20
+    int spam_limit; // DEFAULT: 12
     int milter_debug_level; // DEFAULT: 0 | MAX: 6
     int hash_table_size; // DEFAULT: 2000000
-    int clean_interval; // DEFAULT: 1200 | 10 min.
+    int clean_interval; // DEFAULT: 2400 | 20 min.
     int max_save_time; // DEFAULT: 600 | 5 min.
-    float time_percentage_spam; // DEFAULT: 20 (%)
-    float time_percentage_super_spam; // DEFAULT: 40 (%)
+    float time_percentage_spam; // DEFAULT: 50 (%)
+    float time_percentage_super_spam; // DEFAULT: 75 (%)
     float score_percentage_spam; // DEFAULT: 15 (%)
     float score_percentage_super_spam; // DEFAULT: 35 (%)
+    int forward_counter_limit; // DEFAULT: 20
     float forward_percentage_limit; // DEFAULT: 15 (%)
-    char* database_path; // DEFAULT: ./db.data
     char* socket_path; // DEFAULT: local:/tmp/f1.sock
     char** blacklist; // DEFAULT: [] | PRIVATE
     char** whitelist; // DEFAULT: [] | PRIVATE
