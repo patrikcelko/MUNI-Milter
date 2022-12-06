@@ -515,7 +515,7 @@ void statistics_load(statistics_t* statistics)
         syslog(LOG_WARNING, "Was not able to remove the old statistics file. Path: %s.", path);
     }
 
-    if(OPTIONS->verbose) {
+    if(OPTIONS.verbose) {
         print_statistics();
     }
 }
