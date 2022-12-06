@@ -27,8 +27,9 @@
 /* Settings structure */
 struct settings {
     bool dry_run; // DEFAULT: false
-    bool save_database; // DEFAULT: true
+    bool save_data; // DEFAULT: true
     char* database_path; // DEFAULT: ./db.data
+    char* statistics_path; // DEFAULT: ./stat.data
     int super_spam_limit; // DEFAULT: 20
     int spam_limit; // DEFAULT: 12
     int milter_debug_level; // DEFAULT: 0 | MAX: 6
