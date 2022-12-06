@@ -754,26 +754,6 @@ int main(int argc, char* argv[])
 /******************************* MILTER ******************************/
 /*********************************************************************/
 
-
-
-
-//TODO refactor
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /* Unknown or unimplemented SMTP command */
 sfsistat mlfi_unknown(SMFICTX* ctx, const char* cmd)
 {
@@ -781,7 +761,8 @@ sfsistat mlfi_unknown(SMFICTX* ctx, const char* cmd)
     syslog(LOG_WARNING, "Found an unknown command %s (ending connection).", cmd);
     syslog(LOG_DEBUG, "[mlfi_unknown] An unknown command, rejecting.");
 
-    return SETTINGS->dry_run ? SMFIS_CONTINUE : SMFIS_REJECT; // This will call the function 'mlfi_abort'
+    // This will call the function 'mlfi_abort'
+    return SETTINGS->dry_run ? SMFIS_CONTINUE : SMFIS_REJECT;
 }
 
 /* The connection was canceled. */
@@ -812,7 +793,7 @@ sfsistat mlfi_connect(SMFICTX* ctx, char* hostname, _SOCK_ADDR* hostaddr)
     syslog(LOG_DEBUG, "[mlfi_connect] Passing relay: %s.", smfi_getsymval(ctx, "{_}"));
 
     if (SETTINGS->dry_run) {
-        syslog(LOG_INFO, "Dry-run was activated.");
+        syslog(LOG_INFO, "Dry-run was activated!");
     }
 
     if (!hostaddr) {
@@ -820,8 +801,11 @@ sfsistat mlfi_connect(SMFICTX* ctx, char* hostname, _SOCK_ADDR* hostaddr)
     }
 
     syslog(LOG_DEBUG, "[mlfi_connect] Empty data structure. Starting initialization.");
+    
     pthread_mutex_lock(&DATA_MUTEX);
+    
     private_data_t* data = malloc(sizeof(private_data_t));
+    
     pthread_mutex_unlock(&DATA_MUTEX);
 
     if (!data) {
@@ -830,9 +814,11 @@ sfsistat mlfi_connect(SMFICTX* ctx, char* hostname, _SOCK_ADDR* hostaddr)
     }
 
     pthread_mutex_lock(&DATA_MUTEX);
+
     if (!init_private_data(ctx, data)) {
         return SMFIS_TEMPFAIL;
     }
+    
     pthread_mutex_unlock(&DATA_MUTEX);
 
     syslog(LOG_DEBUG, "[mlfi_connect] Milter successfully established a connection. Hostname: %s", hostname);
@@ -859,19 +845,23 @@ sfsistat mlfi_envfrom(SMFICTX* ctx, char** envfrom)
     syslog(LOG_DEBUG, "[mlfi_envfrom] The client address was successfully parsed: %s.", retrieved_hostname);
 
     pthread_mutex_lock(&DATA_MUTEX);
+
     data->from = remove_brackets(envfrom[0], '<', '>');
     data->sender_hostname = strdup(retrieved_hostname);
+
     pthread_mutex_unlock(&DATA_MUTEX);
 
     if (!data->from) {
-        syslog(LOG_ERR, "Can not find the sender. Rejecting connection.");
+        syslog(LOG_ERR, "Can not find the sender. Rejecting connection."); // Ensured by SMTP
         return SMFIS_TEMPFAIL;
     }
 
     char* auth_result = smfi_getsymval(ctx, "{auth_authen}");
 
     pthread_mutex_lock(&DATA_MUTEX);
+
     data->is_auth = auth_result != NULL;
+
     pthread_mutex_unlock(&DATA_MUTEX);
 
     if (data->is_auth) {
@@ -894,11 +884,13 @@ sfsistat mlfi_envrcpt(SMFICTX* ctx, char** envrcpt)
     }
 
     pthread_mutex_lock(&DATA_MUTEX);
+
     data->to = remove_brackets(envrcpt[0], '<', '>');
+
     pthread_mutex_unlock(&DATA_MUTEX);
 
     if (!data->to) {
-        syslog(LOG_ERR, "Can not find the recipient. Rejecting connection.");
+        syslog(LOG_ERR, "Can not find the recipient. Rejecting connection."); // Ensured by SMTP
         return SMFIS_TEMPFAIL;
     }
 
@@ -906,19 +898,18 @@ sfsistat mlfi_envrcpt(SMFICTX* ctx, char** envrcpt)
     return SMFIS_CONTINUE;
 }
 
-/* Header parser */
+/* Header parser | NOTE: I do not advise decompose this function */
 sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
 {
     syslog(LOG_DEBUG, "[mlfi_header] Starting to parse %s : %s", headerf, headerv);
+    
     private_data_t* data = smfi_getpriv(ctx);
-
     if (!data) {
         syslog(LOG_ERR, "Was not able to load private data. Rejecting connection from 'mlfi_header'.");
         return SMFIS_TEMPFAIL;
     }
 
-    // SpamAssassin score
-    if (!strcmp(headerf, HEADER_SPAM)) {
+    if (!strcmp(headerf, HEADER_SPAM)) { // SpamAssassin score
         char* score_string = strstr(headerv, "score=");
         if (score_string) {
             char* end_ptr;
@@ -937,16 +928,14 @@ sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
         return SMFIS_CONTINUE;
     }
 
-    // Subject
-    if (!strcmp(headerf, HEADER_SUBJECT)) {
+    if (!strcmp(headerf, HEADER_SUBJECT)) { // Subject
         pthread_mutex_lock(&DATA_MUTEX);
         data->subject = strdup(headerv);
         pthread_mutex_unlock(&DATA_MUTEX);
         return SMFIS_CONTINUE;
     }
 
-    // Forward counter
-    if (!strcmp(headerf, HEADER_FORWARD_COUNTER)) {
+    if (!strcmp(headerf, HEADER_FORWARD_COUNTER)) { // Forward counter
         char* end_ptr;
         errno = 0;
         int temp_counter = (int)strtol(headerv, &end_ptr, 10);
@@ -962,23 +951,20 @@ sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
         pthread_mutex_unlock(&DATA_MUTEX);
         return SMFIS_CONTINUE;
     }
-
-    // Debug print informing about repeated pass through our Milter
-    if (!strcmp(headerf, HEADER_INFO)) {
+    
+    if (!strcmp(headerf, HEADER_INFO)) { // Debug print informing about repeated pass through our Milter
         syslog(LOG_DEBUG, "[mlfi_header] The email was already seen by the MUNI relay. Info: %s", headerv);
         return SMFIS_CONTINUE;
     }
 
-    // Emial ID
-    if (!strcmp(headerf, HEADER_ID)) {
+    if (!strcmp(headerf, HEADER_ID)) { // Emial ID
         pthread_mutex_lock(&DATA_MUTEX);
         data->email_id = remove_brackets(headerv, '<', '>');
         pthread_mutex_unlock(&DATA_MUTEX);
         return SMFIS_CONTINUE;
     }
-
-    // Header FROM
-    if (!strcmp(headerf, HEADER_FROM)) {
+    
+    if (!strcmp(headerf, HEADER_FROM)) { // Header FROM
         pthread_mutex_lock(&DATA_MUTEX);
         data->header_from = strdup(headerv);
         pthread_mutex_unlock(&DATA_MUTEX);
@@ -986,32 +972,29 @@ sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
         return SMFIS_CONTINUE;
     }
 
-    // Header TO
-    if (!strcmp(headerf, HEADER_TO)) {
+    if (!strcmp(headerf, HEADER_TO)) { // Header TO
         pthread_mutex_lock(&DATA_MUTEX);
         data->header_to = strdup(headerv);
         pthread_mutex_unlock(&DATA_MUTEX);
         return SMFIS_CONTINUE;
     }
 
-    // Quarantine flag
-    if (!strcmp(headerf, HEADER_QUARANTINE)) {
+    if (!strcmp(headerf, HEADER_QUARANTINE)) { // Quarantine flag
         pthread_mutex_lock(&DATA_MUTEX);
         data->header_quarantine = strcmp(headerv, "Yes");
         pthread_mutex_unlock(&DATA_MUTEX);
         return SMFIS_CONTINUE;
     }
 
-    // Unknown header... continue
-    return SMFIS_CONTINUE;
+    return SMFIS_CONTINUE; // Unknown header... continue
 }
 
 /* End of the header */
 sfsistat mlfi_eoh(SMFICTX* ctx)
 {
     syslog(LOG_DEBUG, "[mlfi_eoh] Entering function 'mlfi_eoh'. The header was successfully parsed.");
+    
     private_data_t* data = smfi_getpriv(ctx);
-
     if (!data) {
         syslog(LOG_ERR, "Was not able to load private data. Rejecting connection from 'mlfi_eoh'.");
         return SMFIS_TEMPFAIL;
@@ -1023,11 +1006,13 @@ sfsistat mlfi_eoh(SMFICTX* ctx)
     }
 
     if (data->header_quarantine) {
-        syslog(LOG_DEBUG, "[mlfi_eoh] The email was already marked as spam (forward). Email ID: %s", data->email_id);
+        syslog(LOG_DEBUG, "[mlfi_eoh] The email was already marked as super-spam (forward). Email ID: %s", 
+            data->email_id);
     }
 
     if (data->spam_score == -1) {
-        syslog(LOG_WARNING, "Was not able to find the spam assassin score in the header of the email. This could be a potential problem.");
+        syslog(LOG_WARNING, "Was not able to find the spam assassin score in the header of the email.");
+        
         pthread_mutex_lock(&DATA_MUTEX);
         data->spam_score = SETTINGS->dry_run ? 0 : 15;
         pthread_mutex_unlock(&DATA_MUTEX);
@@ -1035,6 +1020,7 @@ sfsistat mlfi_eoh(SMFICTX* ctx)
 
     if (data->forward_counter != 0) {
         syslog(LOG_DEBUG, "[mlfi_eoh] Forward through MUNI relay was detected. Forward counter: %d.", data->forward_counter);
+        
         pthread_mutex_lock(&DATA_MUTEX);
         data->is_forward = true;
         pthread_mutex_unlock(&DATA_MUTEX);
@@ -1066,6 +1052,76 @@ sfsistat mlfi_body(SMFICTX* ctx, u_char* bodyp, size_t bodylen)
     syslog(LOG_DEBUG, "[mlfi_body] The message body was successfully parsed.");
     return SMFIS_CONTINUE;
 }
+
+/* Cleanup after connection is closed */
+sfsistat mlfi_cleanup(SMFICTX* ctx, sfsistat return_value)
+{
+    private_data_t* data = smfi_getpriv(ctx);
+    syslog(LOG_DEBUG, "[mlfi_cleanup] Entering function 'mlfi_cleanup'. Starting cleanup.");
+    
+    pthread_mutex_lock(&DATA_MUTEX);
+    if (data) {
+        free(data->sender_hostname);
+        free(data->email_id);
+        free(data->from);
+        free(data->to);
+        free(data->subject);
+        free(data->header_from);
+        free(data->header_to);
+    }
+    free(data);
+
+    if (smfi_setpriv(ctx, NULL) != MI_SUCCESS) {
+        syslog(LOG_ERR, "Was not able to set private data to NULL.");
+        return SMFIS_TEMPFAIL;
+    }
+    pthread_mutex_unlock(&DATA_MUTEX);
+
+    db_cleanup(DATABASE);
+
+    syslog(LOG_DEBUG, "[mlfi_cleanup] Successfully cleared all private data.");
+    return return_value;
+}
+
+
+
+
+//TODO refactor
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /* End of the message */
 sfsistat mlfi_eom(SMFICTX* ctx)
@@ -1200,32 +1256,4 @@ eom_finish:;
     return mlfi_cleanup(ctx, SMFIS_CONTINUE);
 }
 
-/* Cleanup after connection is closed */
-sfsistat mlfi_cleanup(SMFICTX* ctx, sfsistat return_value)
-{
-    private_data_t* data = smfi_getpriv(ctx);
-    syslog(LOG_DEBUG, "[mlfi_cleanup] Entering function 'mlfi_cleanup'. Starting cleanup.");
-    
-    pthread_mutex_lock(&DATA_MUTEX);
-    if (data) {
-        free(data->sender_hostname);
-        free(data->email_id);
-        free(data->from);
-        free(data->to);
-        free(data->subject);
-        free(data->header_from);
-        free(data->header_to);
-    }
-    free(data);
 
-    if (smfi_setpriv(ctx, NULL) != MI_SUCCESS) {
-        syslog(LOG_ERR, "Was not able to set private data to NULL.");
-        return SMFIS_TEMPFAIL;
-    }
-    pthread_mutex_unlock(&DATA_MUTEX);
-
-    db_cleanup(DATABASE);
-
-    syslog(LOG_DEBUG, "[mlfi_cleanup] Successfully cleared all private data.");
-    return return_value;
-}
