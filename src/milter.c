@@ -52,6 +52,7 @@ static char AUTHOR[] = "Patrik Celko"; // Email headers do not like 'Č'
 static char MILTER_NAME[] = "MUNI-Milter";
 static char OPTSTRING[] = "hVvdc:";
 static bool ALLOW_REPLY = true; // This can be set to false to not send reply messages about quarantine
+static char STATISTICS_DELIMITER[] = ";";
 
 /* Headers names */
 static char HEADER_FORWARD_COUNTER[] = "X-MUNI-Forward-Counter"; // HEADER: Trip counter
@@ -318,6 +319,262 @@ bool init_private_data(SMFICTX* ctx, private_data_t* data)
     return smfi_setpriv(ctx, data) == MI_SUCCESS;
 }
 
+/*********************************************************************/
+/***************************** STATISTICS ****************************/
+/*********************************************************************/
+
+/* [Thread-Safe] Create a new empty record in the statistics */
+statistics_record_t* create_new_stat_record(char* name)
+{
+    statistics_record_t* record = malloc(sizeof(statistics_record_t));
+    if (!record) {
+        syslog(LOG_ERR, "Was not able to create a statistics record for %s.", name);
+        return NULL;
+    }
+
+    pthread_mutex_lock(&DATA_MUTEX);
+
+    record->name = strdup(name);
+    record->forwarded_emails_counter = 0;
+    record->parsed_email_counter = 0;
+    record->super_spam_counter = 0;
+    record->spam_counter = 0;
+    record->average_score = 0;
+    record->average_time = 0;
+
+    STATISTICS->array_size++;
+
+    // We will save it at the end of the array
+    STATISTICS->data[STATISTICS->array_size - 1] = record;
+
+    pthread_mutex_unlock(&DATA_MUTEX);
+
+    syslog(LOG_DEBUG, "[create_new_stat_record] Created a new record with the name %s.", name);
+    return record;
+}
+
+/* [Thread-Safe] Retrieve statistics record by faculty server name */
+statistics_record_t* retrieve_statistics_record(char* server_name)
+{
+    syslog(LOG_DEBUG, "[retrieve_statistics_record] Retrieving statistic record for: %s", server_name);
+
+    for (size_t i = 0; i < STATISTICS->array_size; ++i) {
+        if (!strcmp((STATISTICS->data)[i]->name, server_name)) {
+            syslog(LOG_DEBUG, "[retrieve_statistics_record] Successfully retrieved record for %s", (STATISTICS->data)[i]->name);
+            return (STATISTICS->data)[i];
+        }
+    }
+
+    // This means we do not have a selected faculty server in our statistics and we need to add him.
+    if (STATISTICS->array_size >= 255) {
+        syslog(LOG_ERR, "We reached the limit for the statistics record (this should not happen). Exiting milter.");
+        exit_milter(true);
+    }
+
+    statistics_record_t *ret_record = create_new_stat_record(server_name);
+
+    if (!ret_record) {
+        exit_milter(true);
+    }
+    return ret_record;
+}
+
+/* [Thread-Safe] Print actual statistics of the MUNI Milter */
+void print_statistics()
+{
+    syslog(LOG_DEBUG, "[print_statistics] Printing statistics data. Entries: %ld", STATISTICS->array_size);
+
+    if (!STATISTICS) {
+        syslog(LOG_ERR, "Can not print scores for invalid statistics.");
+        return;
+    }
+
+    syslog(LOG_INFO, "[STATISTICS] Email statistics:");
+    for (size_t i = 0; i < STATISTICS->array_size; ++i) {
+        syslog(LOG_INFO, "     <%s>: Total: %llu | Forwarded: %llu | Super-spam: %llu | Spam: %llu", 
+            (STATISTICS->data)[i]->name, (STATISTICS->data)[i]->parsed_email_counter, 
+            (STATISTICS->data)[i]->forwarded_emails_counter, (STATISTICS->data)[i]->super_spam_counter,
+            (STATISTICS->data)[i]->spam_counter);
+    }
+
+    syslog(LOG_INFO, "[STATISTICS] Average values:");
+    for (size_t i = 0; i < STATISTICS->array_size; ++i) {
+        syslog(LOG_INFO, "     <%s>: Spam score: %.2f | Time: %.2f", 
+            (STATISTICS->data)[i]->name, (STATISTICS->data)[i]->average_score, 
+            (STATISTICS->data)[i]->average_time);
+    }
+
+    syslog(LOG_DEBUG, "[print_statistics] Statistics data were successfully printed.");
+}
+
+/* [Thread-Unsafe] The function that will parse the line loaded from the saved statistics file  */
+bool load_statistic_line(char *line_content) 
+{
+    char* name = strtok(line_content, STATISTICS_DELIMITER);
+    char* raw_forwarded_emails_counter = strtok(NULL, STATISTICS_DELIMITER);
+    char* raw_parsed_email_counter = strtok(NULL, STATISTICS_DELIMITER);
+    char* raw_super_spam_counter = strtok(NULL, STATISTICS_DELIMITER);
+    char* raw_spam_counter = strtok(NULL, STATISTICS_DELIMITER);
+    char* raw_average_score = strtok(NULL, STATISTICS_DELIMITER);
+    char* raw_average_time = strtok(NULL, STATISTICS_DELIMITER);
+
+    errno = 0;
+    if (!name || !raw_forwarded_emails_counter || !raw_parsed_email_counter || !raw_super_spam_counter ||
+      !raw_spam_counter || !raw_average_score || !raw_average_time) {
+        return false; // Invalid line in statistics file, skipping (missing part)
+    }
+
+    char *end_forwarded_emails_counter; // Parse raw_forwarded_emails_counter as integer
+    int forwarded_emails_counter = strtol(raw_forwarded_emails_counter, &end_forwarded_emails_counter, 10);
+
+    char *end_parsed_email_counter; // Parse raw_parsed_email_counter as integer
+    int parsed_email_counter = strtol(raw_parsed_email_counter, &end_parsed_email_counter, 10);
+
+    char *end_super_spam_counter; // Parse raw_super_spam_counter as integer
+    int super_spam_counter = strtol(raw_super_spam_counter, &end_super_spam_counter, 10);
+
+    char *end_spam_counter; // Parse raw_spam_counter as integer
+    int spam_counter = strtol(raw_spam_counter, &end_spam_counter, 10);
+
+    char *end_average_score; // Parse raw_average_score as float
+    int average_score = strtof(raw_average_score, &end_average_score);
+
+    char *end_average_time; // Parse raw_average_time as float
+    int average_time = strtof(raw_average_time, &end_average_time);
+
+    if (errno != 0 || end_forwarded_emails_counter == raw_forwarded_emails_counter || end_parsed_email_counter == raw_parsed_email_counter ||
+      end_super_spam_counter == raw_super_spam_counter || end_spam_counter == raw_spam_counter || end_average_score == raw_average_score ||
+      end_average_time == raw_average_time) {
+        syslog(LOG_WARNING, "Was not able to load the email_conut, average_time, or average_score from the saved database key: %s. Skipping.", name);
+        return false; // Invalid line in statistics, skipping...
+    }
+
+    statistics_record_t *record = retrieve_statistics_record(name);
+    record->name = strdup(name);
+    record->forwarded_emails_counter = forwarded_emails_counter;
+    record->parsed_email_counter = parsed_email_counter;
+    record->super_spam_counter = super_spam_counter;
+    record->spam_counter = spam_counter;
+    record->average_score = average_score;
+    record->average_time = average_time;
+
+    return true;
+}
+
+/* [Thread-Unsafe] The function that will load previously saved statistics data from the file */
+void statistics_load(statistics_t* statistics)
+{
+    if (!statistics || !SETTINGS || !SETTINGS->statistics_path) {
+        syslog(LOG_WARNING, "Was not able to load the statistics file because the statistics or settings instance is invalid.");
+        return;
+    }
+
+    char *path = SETTINGS->statistics_path;
+    FILE* stat_load_fd = fopen(path, "r");
+
+    if (!stat_load_fd) {
+        syslog(LOG_ERR, "Was not able to open the file descriptor for the saved statistics. Path: %s.", path);
+        return;
+    }
+
+    syslog(LOG_DEBUG, "[statistics_load] Starting to load saved statistics from the path: %s.", path);
+
+    char* line_content = NULL;
+    int loaded_counter = 0;
+    size_t data_length;
+
+    while (getline(&line_content, &data_length, stat_load_fd) != EOF) {
+        if(load_statistic_line(line_content)) {
+            loaded_counter++;    
+        }
+    }
+
+    if (line_content) {
+        free(line_content);
+    }
+
+    errno = 0;
+    if (fclose(stat_load_fd) == EBADF || errno) {
+        syslog(LOG_ERR, "Was not able to close the statistic file descriptor after loading. Path: %s.", path);
+    }
+
+    syslog(LOG_DEBUG, "[statistics_load] Statistics were successfully loaded. Loaded (lines): %d.", loaded_counter);
+    syslog(LOG_DEBUG, "[statistics_load] Removing old statistics file.");
+    if (remove(path) == -1) {
+        syslog(LOG_WARNING, "Was not able to remove the old statistics file. Path: %s.", path);
+    }
+}
+
+/* [Thread-Unsafe] Save the whole statistics to file */
+void statistics_save(statistics_t* statistics)
+{
+    if (!statistics || !SETTINGS || !SETTINGS->statistics_path) {
+        syslog(LOG_WARNING, "Was not able to save the statistics file because the statistics or settings instance is invalid.");
+        return;
+    }
+
+    char *path = SETTINGS->statistics_path;
+    FILE* stat_save_fd = fopen(path, "w+");
+
+    if (!stat_save_fd) {
+        syslog(LOG_ERR, "Was not able to open the file descriptor for statistics saving. Path: %s.", path);
+        return;
+    }
+
+    syslog(LOG_DEBUG, "[statistics_save] Starting to save statistics to file: %s.", path);
+    for (size_t i = 0; i < statistics->array_size; ++i) {
+        statistics_record_t *record = (statistics->data)[i];
+        fprintf(stat_save_fd, "%s%s%llu%s%llu%s%llu%s%llu%s%.4f%s%.4f\n", record->name, STATISTICS_DELIMITER, 
+            record->forwarded_emails_counter, STATISTICS_DELIMITER, record->parsed_email_counter, STATISTICS_DELIMITER,
+            record->super_spam_counter, STATISTICS_DELIMITER, record->spam_counter, STATISTICS_DELIMITER, 
+            record->average_score, STATISTICS_DELIMITER, record->average_time);
+    }
+
+    errno = 0;
+    if (fclose(stat_save_fd) == EBADF || errno) {
+        syslog(LOG_ERR, "Was not able to close the statistic file descriptor. Path: %s.", path);
+    }
+    syslog(LOG_INFO, "The statistics were successfully saved to: %s. Saved lines: %ld.", path, statistics->array_size);
+}
+
+/* [Thread-Unsafe] Init statistic structure */
+bool init_statistics()
+{
+    syslog(LOG_DEBUG, "[init_statistics] Trying to initialize statistics structure.");
+    STATISTICS = malloc(sizeof(statistics_t));
+
+    if (!STATISTICS) {
+        syslog(LOG_ERR, "Was not able to allocate an array for statistics structure.");
+        return false;
+    }
+
+    // Initial record for the relay (index 0 will be included in create_new_stat_record)
+    STATISTICS->array_size = 0;
+
+    // This will represent all traffic on the MUNI relay (it will be always on index 0)
+    create_new_stat_record("Relay");
+    return (bool) (STATISTICS->data)[0];
+}
+
+/* [Thread-Safe] Destroy statistic structure */
+void destroy_statistics()
+{
+    syslog(LOG_DEBUG, "[destroy_statistics] Removing statistics from memory.");
+
+    if (!STATISTICS) {
+        syslog(LOG_ERR, "Failed to remove statistics from memory. Probably was not allocated at all.");
+        return;
+    }
+
+    for (size_t i = 0; i < STATISTICS->array_size; ++i) {
+        free((STATISTICS->data)[i]->name);
+        free((STATISTICS->data)[i]);
+    }
+
+    free(STATISTICS);
+    syslog(LOG_DEBUG, "[destroy_statistics] The statistics were successfully removed from memory. Removed: %ld.", 
+        STATISTICS->array_size);
+}
 
 
 
@@ -332,6 +589,10 @@ bool init_private_data(SMFICTX* ctx, private_data_t* data)
 
 
 
+
+
+
+// TODO line
 
 
 
@@ -373,129 +634,17 @@ void set_header(SMFICTX* ctx, char* headerf, char* headerv)
 
 
 
-/*********************************************************************/
-/***************************** STATISTICS ****************************/
-/*********************************************************************/
 
-/* [Thread-Safe] Create a new empty record in the statistics */
-statistics_record_t* create_new_stat_record(char* name)
-{
-    statistics_record_t* record = malloc(sizeof(statistics_record_t));
-    if (!record) {
-        syslog(LOG_ERR, "Was not able to create statistics record.");
-        return NULL;
-    }
 
-    pthread_mutex_lock(&DATA_MUTEX);
 
-    record->name = strdup(name);
-    record->forwarded_emails_counter = 0;
-    record->parsed_email_counter = 0;
-    record->super_spam_counter = 0;
-    record->spam_counter = 0;
-    record->average_score = 0;
-    record->average_time = 0;
 
-    STATISTICS->array_size++;
-    STATISTICS->data[STATISTICS->array_size - 1] = record; // Save to struct
-    pthread_mutex_unlock(&DATA_MUTEX);
 
-    syslog(LOG_DEBUG, "[create_new_stat_record] Successfully created a new record with the name %s.", name);
-    return record;
-}
 
-/* [Thread-Unsafe] Init statistic structure */
-bool init_statistics()
-{
-    syslog(LOG_DEBUG, "[init_statistics] Trying to init statistics structure.");
 
-    STATISTICS = malloc(sizeof(statistics_t));
 
-    if (!STATISTICS) {
-        syslog(LOG_ERR, "Was not able to allocate array for statistics structure.");
-        return false;
-    }
 
-    STATISTICS->array_size = 0; // Initial record for the relay (index 0 will be included in create_new_stat_record)
 
-    // This will represent all traffic on MUNI relay (it will be always on index 0)
-    create_new_stat_record("Relay");
 
-    return (bool) (STATISTICS->data)[0];
-}
-
-/* [Thread-Safe] Print actual statistics for Milter */
-void print_statistics()
-{
-    syslog(LOG_DEBUG, "[print_statistics] Printing statistics data. Entries: %ld", STATISTICS->array_size);
-
-    if (!STATISTICS) {
-        syslog(LOG_ERR, "Can not print scores for invalid statistics.");
-        return;
-    }
-
-    syslog(LOG_INFO, "[STATISTICS] Email statistics:");
-    for (size_t i = 0; i < STATISTICS->array_size; ++i) {
-        syslog(LOG_INFO, "     <%s>: Total: %llu | Forwarded: %llu | Super-spam: %llu | Spam: %llu", 
-            (STATISTICS->data)[i]->name, (STATISTICS->data)[i]->parsed_email_counter, (STATISTICS->data)[i]->forwarded_emails_counter,
-            (STATISTICS->data)[i]->super_spam_counter, (STATISTICS->data)[i]->spam_counter);
-    }
-
-    syslog(LOG_INFO, "[STATISTICS] Average score:");
-    for (size_t i = 0; i < STATISTICS->array_size; ++i) {
-        syslog(LOG_INFO, "     <%s>: Spam score: %.2f | Time: %.2f", 
-            (STATISTICS->data)[i]->name, (STATISTICS->data)[i]->average_score, (STATISTICS->data)[i]->average_time);
-    }
-
-    syslog(LOG_DEBUG, "[print_statistics] Statistics data were successfully printed.");
-}
-
-/* [Thread-Safe] Destroy statistic structure */
-void destroy_statistics()
-{
-    syslog(LOG_DEBUG, "[destroy_statistics] Removing statistics from memory.");
-
-    if (!STATISTICS) {
-        syslog(LOG_ERR, "Failed to remove statistics from memory. Probably was not allocated at all.");
-        return;
-    }
-
-    int total_rec = STATISTICS->array_size;
-    for (int i = 0; i < total_rec; ++i) {
-        free((STATISTICS->data)[i]->name);
-        free((STATISTICS->data)[i]);
-    }
-
-    free(STATISTICS);
-    syslog(LOG_DEBUG, "[destroy_statistics] The statistics were successfully removed from memory. Removed: %d.", total_rec);
-}
-
-/* [Thread-Safe] Retrieve statistics record by faculty server name */
-statistics_record_t* retrieve_statistics_record(char* server_name)
-{
-    syslog(LOG_DEBUG, "[retrieve_statistics_record] Retrieving statistic record for: %s", server_name);
-
-    for (size_t i = 1; i < STATISTICS->array_size; ++i) {
-        if (!strcmp((STATISTICS->data)[i]->name, server_name)) {
-            syslog(LOG_DEBUG, "[retrieve_statistics_record] Successfully retrievd record for %s", (STATISTICS->data)[i]->name);
-            return (STATISTICS->data)[i];
-        }
-    }
-
-    // This means we do not have a selected faculty server in our statistics and we need to add him.
-    if (STATISTICS->array_size >= 255) {
-        syslog(LOG_ERR, "We reached the limit for the statistics record (this should not happen). Exiting milter.");
-        exit_milter(true);
-    }
-
-    statistics_record_t *ret_record = create_new_stat_record(server_name);
-
-    if (!ret_record) {
-        exit_milter(true);
-    }
-    
-    return ret_record;
-}
 
 /* [Thread-Safe] Evaluate spam category for the sender and update statistics data */
 void update_statistics(statistics_record_t* faculty_record, float time_score, float spam_score, bool is_forward, spam_type_t evaluated_type)
@@ -543,9 +692,10 @@ void exit_milter(bool is_fail)
     syslog(LOG_DEBUG, "[exit_milter] Freeing milter resources.");
     free(OPTIONS.config_path);
 
-    if (SETTINGS && SETTINGS->save_database) {
+    if (SETTINGS && SETTINGS->save_data) {
         pthread_mutex_lock(&DATA_MUTEX);
         db_save(DATABASE);
+        statistics_save(STATISTICS);
         pthread_mutex_unlock(&DATA_MUTEX);
     }
 
@@ -589,8 +739,9 @@ int main(int argc, char* argv[])
         exit_milter(true);
     }
 
-    if (SETTINGS->save_database) {
+    if (SETTINGS->save_data) {
         db_load(DATABASE);
+        statistics_load(STATISTICS);
     }
 
     if (!SETTINGS->socket_path || *SETTINGS->socket_path == '\0') {
