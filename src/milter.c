@@ -225,6 +225,15 @@ bool check_is_local(char* address)
     return regexec(&MUNI_MAIL_REGEX, address, 0, NULL, 0) != REG_NOMATCH;
 }
 
+/* [Thread-Safe] Set and validate (with logs) the header */
+void set_header(SMFICTX* ctx, char* headerf, char* headerv)
+{
+    if (smfi_chgheader(ctx, headerf, 1, headerv) == MI_FAILURE) {
+        syslog(LOG_ERR, "Was not able to set the header with key: %s to the value %s.", headerf, headerv);
+    }
+    syslog(LOG_DEBUG, "[set_header] The header with key %s was successfully set.", headerf);
+}
+
 /* [Thread-Safe] Mark selected email as spam */
 void mark_as_spam(SMFICTX* ctx, private_data_t* data)
 {
@@ -360,7 +369,8 @@ statistics_record_t* retrieve_statistics_record(char* server_name)
 
     for (size_t i = 0; i < STATISTICS->array_size; ++i) {
         if (!strcmp((STATISTICS->data)[i]->name, server_name)) {
-            syslog(LOG_DEBUG, "[retrieve_statistics_record] Successfully retrieved record for %s", (STATISTICS->data)[i]->name);
+            syslog(LOG_DEBUG, "[retrieve_statistics_record] Successfully retrieved record for %s", 
+                (STATISTICS->data)[i]->name);
             return (STATISTICS->data)[i];
         }
     }
@@ -442,10 +452,11 @@ bool load_statistic_line(char *line_content)
     char *end_average_time; // Parse raw_average_time as float
     int average_time = strtof(raw_average_time, &end_average_time);
 
-    if (errno != 0 || end_forwarded_emails_counter == raw_forwarded_emails_counter || end_parsed_email_counter == raw_parsed_email_counter ||
-      end_super_spam_counter == raw_super_spam_counter || end_spam_counter == raw_spam_counter || end_average_score == raw_average_score ||
+    if (errno != 0 || end_forwarded_emails_counter == raw_forwarded_emails_counter || 
+      end_parsed_email_counter == raw_parsed_email_counter || end_super_spam_counter == raw_super_spam_counter ||
+      end_spam_counter == raw_spam_counter || end_average_score == raw_average_score ||
       end_average_time == raw_average_time) {
-        syslog(LOG_WARNING, "Was not able to load the email_conut, average_time, or average_score from the saved database key: %s. Skipping.", name);
+        syslog(LOG_WARNING, "Was not able to load the line from the statistic file: %s. Skipping.", name);
         return false; // Invalid line in statistics, skipping...
     }
 
@@ -465,7 +476,7 @@ bool load_statistic_line(char *line_content)
 void statistics_load(statistics_t* statistics)
 {
     if (!statistics || !SETTINGS || !SETTINGS->statistics_path) {
-        syslog(LOG_WARNING, "Was not able to load the statistics file because the statistics or settings instance is invalid.");
+        syslog(LOG_WARNING, "Was not able to load the statistics file (invalid settings or statistics).");
         return;
     }
 
@@ -503,13 +514,17 @@ void statistics_load(statistics_t* statistics)
     if (remove(path) == -1) {
         syslog(LOG_WARNING, "Was not able to remove the old statistics file. Path: %s.", path);
     }
+
+    if(OPTIONS->verbose) {
+        print_statistics();
+    }
 }
 
 /* [Thread-Unsafe] Save the whole statistics to file */
 void statistics_save(statistics_t* statistics)
 {
     if (!statistics || !SETTINGS || !SETTINGS->statistics_path) {
-        syslog(LOG_WARNING, "Was not able to save the statistics file because the statistics or settings instance is invalid.");
+        syslog(LOG_WARNING, "Was not able to save the statistics file (invalid settings or statistics).");
         return;
     }
 
@@ -556,7 +571,7 @@ bool init_statistics()
     return (bool) (STATISTICS->data)[0];
 }
 
-/* [Thread-Safe] Destroy statistic structure */
+/* [Thread-Unsafe] Destroy statistic structure */
 void destroy_statistics()
 {
     syslog(LOG_DEBUG, "[destroy_statistics] Removing statistics from memory.");
@@ -576,94 +591,29 @@ void destroy_statistics()
         STATISTICS->array_size);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// TODO line
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/*********************************************************************/
-/*************************** MISC FUNCTIONS **************************/
-/*********************************************************************/
-
-
-
-/* [Thread-Safe] Set and validate (with logs) the header */
-void set_header(SMFICTX* ctx, char* headerf, char* headerv)
-{
-    if (smfi_chgheader(ctx, headerf, 1, headerv) == MI_FAILURE) {
-        syslog(LOG_ERR, "Was not able to set the header with key: %s to the value %s.", headerf, headerv);
-    }
-    syslog(LOG_DEBUG, "[set_header] The header with key %s was successfully set.", headerf);
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /* [Thread-Safe] Evaluate spam category for the sender and update statistics data */
-void update_statistics(statistics_record_t* faculty_record, float time_score, float spam_score, bool is_forward, spam_type_t evaluated_type)
+void update_statistics(statistics_record_t* faculty_record, float time_score, float spam_score, 
+    bool is_forward, spam_type_t evaluated_type)
 {
     statistics_record_t* relay_record = (STATISTICS->data)[0];
 
     pthread_mutex_lock(&DATA_MUTEX);
+    
     if (is_forward) {
         relay_record->forwarded_emails_counter++;
         faculty_record->forwarded_emails_counter++;
     }
 
+    int r_count = relay_record->parsed_email_counter;
+    int f_count = faculty_record->parsed_email_counter;
+
     // Update average score for relay and faculty server
-    relay_record->average_score = (relay_record->average_score * relay_record->parsed_email_counter + spam_score) / (relay_record->parsed_email_counter + 1);
-    faculty_record->average_score = (faculty_record->average_score * faculty_record->parsed_email_counter + spam_score) / (faculty_record->parsed_email_counter + 1);
+    relay_record->average_score = (relay_record->average_score * r_count + spam_score) / (r_count + 1);
+    faculty_record->average_score = (faculty_record->average_score * f_count + spam_score) / (f_count + 1);
 
     // Update average time for relay and faculty server
-    relay_record->average_time = (relay_record->average_time * relay_record->parsed_email_counter + time_score) / (relay_record->parsed_email_counter + 1);
-    faculty_record->average_time = (faculty_record->average_time * faculty_record->parsed_email_counter + time_score) / (faculty_record->parsed_email_counter + 1);
+    relay_record->average_time = (relay_record->average_time * r_count + time_score) / (r_count + 1);
+    faculty_record->average_time = (faculty_record->average_time * f_count + time_score) / (f_count + 1);
 
     if (evaluated_type == SPAM) {
         relay_record->spam_counter++;
@@ -678,8 +628,9 @@ void update_statistics(statistics_record_t* faculty_record, float time_score, fl
     relay_record->parsed_email_counter++;
     faculty_record->parsed_email_counter++;
 
-    syslog(LOG_DEBUG, "Successfully updated statistic record for: %s", faculty_record->name);
     pthread_mutex_unlock(&DATA_MUTEX);
+
+    syslog(LOG_DEBUG, "[update_statistics] Successfully updated statistic record for: %s", faculty_record->name);
 }
 
 /*********************************************************************/
@@ -694,17 +645,21 @@ void exit_milter(bool is_fail)
 
     if (SETTINGS && SETTINGS->save_data) {
         pthread_mutex_lock(&DATA_MUTEX);
+        
         db_save(DATABASE);
         statistics_save(STATISTICS);
+        
         pthread_mutex_unlock(&DATA_MUTEX);
     }
 
     print_statistics();
 
     pthread_mutex_lock(&DATA_MUTEX);
+
     destroy_statistics();
     db_destroy(DATABASE);
     settings_destroy(SETTINGS);
+
     pthread_mutex_unlock(&DATA_MUTEX);
 
     syslog(LOG_INFO, "Exiting milter. Goodbye.");
@@ -798,6 +753,26 @@ int main(int argc, char* argv[])
 /*********************************************************************/
 /******************************* MILTER ******************************/
 /*********************************************************************/
+
+
+
+
+//TODO refactor
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /* Unknown or unimplemented SMTP command */
 sfsistat mlfi_unknown(SMFICTX* ctx, const char* cmd)
