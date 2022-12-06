@@ -19,7 +19,7 @@
  * NOTES:       This Milter will need additional libs (settings, database) to run.
  * AUTHOR:      Patrik Čelko
  *
-*****************************************************************************************/
+ *****************************************************************************************/
 
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE
@@ -30,6 +30,7 @@
 #include <libmilter/mfdef.h>
 #include <math.h>
 #include <pthread.h>
+#include <regex.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -40,7 +41,6 @@
 #include <syslog.h>
 #include <time.h>
 #include <unistd.h>
-#include <regex.h>
 
 #include "libs/database.h"
 #include "libs/settings.h"
@@ -51,7 +51,8 @@ static char VERSION[] = "1.2.0";
 static char AUTHOR[] = "Patrik Celko"; // Email headers do not like 'Č'
 static char MILTER_NAME[] = "MUNI-Milter";
 static char OPTSTRING[] = "hVvdc:";
-static bool ALLOW_REPLY = true; // This can be set to false to not send reply messages about quarantine
+static bool ALLOW_REPLY = false; // This can be set to true to send reply messages about quarantine
+static bool ALLOW_NEWSLETTERS = true;
 static char STATISTICS_DELIMITER[] = ";";
 
 /* Headers names */
@@ -59,7 +60,7 @@ static char HEADER_FORWARD_COUNTER[] = "X-MUNI-Forward-Counter"; // HEADER: Trip
 static char HEADER_FROM[] = "X-MUNI-From"; // HEADER: Sender email
 static char HEADER_TO[] = "X-MUNI-To"; // HEADER: Recipient email
 static char HEADER_QUARANTINE[] = "X-MUNI-Quarantine"; // HEADER: Should email go to quarantine?
-static char HEADER_INFO[] = "X-MUNI-Info"; // HEADER: Information about milter
+static char HEADER_INFO[] = "X-MUNI-Info"; // HEADER: Information about Milter
 static char HEADER_IS_AUTH[] = "X-MUNI-Auth"; // HEADER: Is the user authenticated?
 static char HEADER_IS_FORWARD[] = "X-MUNI-Forward"; // HEADER: Is it forward?
 static char HEADER_SPAM[] = "X-Spam-Status"; // HEADER: X-Spam-Flag will be yes if > 5
@@ -81,7 +82,7 @@ static sigset_t SIGNALS_SET;
 static options_t OPTIONS = { 0 };
 
 /* Regex to match any MUNI email: .+\@(.+\.{1})*muni\.cz */
-static regex_t MUNI_MAIL_REGEX = { 0 }; 
+static regex_t MUNI_MAIL_REGEX = { 0 };
 
 /* Available options */
 static struct option longopts[] = {
@@ -128,7 +129,7 @@ void signal_handler(int recieved_signal)
 
     if (recieved_signal == SIGINT) {
         syslog(LOG_DEBUG, "[signal_handler] The SIGINT signal was received. Exiting Milter.");
-        if(!OPTIONS.daemon && OPTIONS.verbose) {
+        if (!OPTIONS.daemon && OPTIONS.verbose) {
             fprintf(stdout, "[%s] Turning off MUNI-Milter. Please wait... \n", MILTER_NAME);
         }
 
@@ -163,7 +164,7 @@ void* signals_thread()
 
     while (true) {
         if (sigprocmask(SIG_BLOCK, &SIGNALS_SET, NULL)) {
-            syslog(LOG_ERR, "Was not able to mask signals. Exiting milter.");
+            syslog(LOG_ERR, "Was not able to mask signals. Exiting Milter.");
             exit_milter(true);
         }
 
@@ -182,10 +183,10 @@ void print_help(char* argv[])
     printf("%s [OPTIONS]\n\n \
 OPTIONS:\n \
     -h,--help - Show help\n \
-    -V,--version - Display milter version\n \
+    -V,--version - Display Milter version\n \
     -v,--verbose - Show debug and additional messages\n \
     -c,--config [path] - Load config file from the specific path\n \
-    -d,--daemon - Run milter as a daemon\n",
+    -d,--daemon - Run Milter as a daemon\n",
         argv[0]);
 }
 
@@ -193,13 +194,13 @@ OPTIONS:\n \
 char* get_faculty_name(char* original_from, char* original_to)
 {
     // Something (even MUNI email) -> MUNI
-    if(regexec(&MUNI_MAIL_REGEX, original_to, 0, NULL, 0) != REG_NOMATCH) {
+    if (regexec(&MUNI_MAIL_REGEX, original_to, 0, NULL, 0) != REG_NOMATCH) {
         strtok(original_to, "@"); // This is the beginning of the email address (user part)
         return strtok(NULL, "@");
     }
 
     // MUNI -> Something (not MUNI email)
-    if(regexec(&MUNI_MAIL_REGEX, original_from, 0, NULL, 0) != REG_NOMATCH) {
+    if (regexec(&MUNI_MAIL_REGEX, original_from, 0, NULL, 0) != REG_NOMATCH) {
         strtok(original_from, "@"); // User part let's skip it again
         return strtok(NULL, "@");
     }
@@ -235,24 +236,48 @@ void set_header(SMFICTX* ctx, char* headerf, char* headerv)
 }
 
 /* [Thread-Safe] Mark selected email as spam */
-void mark_as_spam(SMFICTX* ctx, private_data_t* data)
+void block_email(SMFICTX* ctx, private_data_t* data, char* message, char* code, bool force_reply)
 {
     if (SETTINGS->dry_run) {
-        syslog(LOG_DEBUG, "[mark_as_spam] The email was marked as spam in dry-run mode. ID: %s.", data->email_id);
+        syslog(LOG_DEBUG, "[block_email] The email was blocked in dry-run mode. ID: %s.", data->email_id);
         return; // In dry-run mode, we do not want to affect emails
     }
-    
-    if (smfi_quarantine(ctx, "Spammer access rejected") == MI_FAILURE) {
-        syslog(LOG_ERR, "Was not able to mark email %s as spam. This is an urgent problem (Hostname: %s).", 
+
+    if (smfi_quarantine(ctx, message) == MI_FAILURE) {
+        syslog(LOG_ERR, "Was not able to block email: %s. This is an urgent problem (Hostname: %s).",
             data->email_id, data->sender_hostname);
     }
-        
-    if (ALLOW_REPLY) {
-        if (smfi_setmlreply(ctx, "550", "5.7.0", "Spammer access rejected", NULL) == MI_FAILURE) {
-            syslog(LOG_ERR, "Was not able to send multi-line messages for email %s (Hostname: %s).", 
+
+    // For Auth. users we want to force a reply
+    if (ALLOW_REPLY || force_reply) {
+        if (smfi_setmlreply(ctx, code, "5.7.0", message, NULL) == MI_FAILURE) {
+            syslog(LOG_ERR, "Was not able to send multi-line messages for email %s (Hostname: %s).",
                 data->email_id, data->sender_hostname);
         }
     }
+}
+
+/* [Thread-Safe] Simple evaluator, that decides sender's category */
+spam_type_t evaluate_result_type(spam_type_t orig_res, entry_t* entry,
+    statistics_record_t* faculty_record, private_data_t* data)
+{
+    spam_type_t result = NORMAL;
+
+    if (entry->average_score > SETTINGS->spam_limit || 
+        entry->average_score * (1 + SETTINGS->score_percentage_spam) > faculty_record->average_score || 
+        entry->average_time * (1 + SETTINGS->time_percentage_spam) > faculty_record->average_time) {
+        syslog(LOG_WARNING, "Spam level was reached for email ID: %s.", data->email_id);
+        result = SPAM;
+    }
+
+    if (entry->average_score > SETTINGS->super_spam_limit || 
+        entry->average_score * (1 + SETTINGS->score_percentage_super_spam) > faculty_record->average_score || 
+        entry->average_time * (1 + SETTINGS->time_percentage_super_spam) > faculty_record->average_time) {
+        syslog(LOG_WARNING, "Super-spam level was reached for email ID: %s.", data->email_id);
+        result = SUPERSPAM;
+    }
+
+    return result > orig_res ? result : orig_res; // Return worse one
 }
 
 /*********************************************************************/
@@ -289,7 +314,8 @@ void init_options(int argc, char* argv[], options_t* options)
 }
 
 /* [Thread-Unsafe] Init regex for MUNI emails */
-bool init_mail_regex() {
+bool init_mail_regex()
+{
     syslog(LOG_DEBUG, "[init_mail_regex] Starting mail regex initialization.");
 
     if (!regcomp(&MUNI_MAIL_REGEX, ".+\\@(.+\\.{1})*celko\\.cz", REG_EXTENDED)) {
@@ -369,7 +395,7 @@ statistics_record_t* retrieve_statistics_record(char* server_name)
 
     for (size_t i = 0; i < STATISTICS->array_size; ++i) {
         if (!strcmp((STATISTICS->data)[i]->name, server_name)) {
-            syslog(LOG_DEBUG, "[retrieve_statistics_record] Successfully retrieved record for %s", 
+            syslog(LOG_DEBUG, "[retrieve_statistics_record] Successfully retrieved record for %s",
                 (STATISTICS->data)[i]->name);
             return (STATISTICS->data)[i];
         }
@@ -377,11 +403,11 @@ statistics_record_t* retrieve_statistics_record(char* server_name)
 
     // This means we do not have a selected faculty server in our statistics and we need to add him.
     if (STATISTICS->array_size >= 255) {
-        syslog(LOG_ERR, "We reached the limit for the statistics record (this should not happen). Exiting milter.");
+        syslog(LOG_ERR, "We reached the limit for the statistics record (this should not happen).");
         exit_milter(true);
     }
 
-    statistics_record_t *ret_record = create_new_stat_record(server_name);
+    statistics_record_t* ret_record = create_new_stat_record(server_name);
 
     if (!ret_record) {
         exit_milter(true);
@@ -401,16 +427,16 @@ void print_statistics()
 
     syslog(LOG_INFO, "[STATISTICS] Email statistics:");
     for (size_t i = 0; i < STATISTICS->array_size; ++i) {
-        syslog(LOG_INFO, "     <%s>: Total: %llu | Forwarded: %llu | Super-spam: %llu | Spam: %llu", 
-            (STATISTICS->data)[i]->name, (STATISTICS->data)[i]->parsed_email_counter, 
+        syslog(LOG_INFO, "     <%s>: Total: %llu | Forwarded: %llu | Super-spam: %llu | Spam: %llu",
+            (STATISTICS->data)[i]->name, (STATISTICS->data)[i]->parsed_email_counter,
             (STATISTICS->data)[i]->forwarded_emails_counter, (STATISTICS->data)[i]->super_spam_counter,
             (STATISTICS->data)[i]->spam_counter);
     }
 
     syslog(LOG_INFO, "[STATISTICS] Average values:");
     for (size_t i = 0; i < STATISTICS->array_size; ++i) {
-        syslog(LOG_INFO, "     <%s>: Spam score: %.2f | Time: %.2f", 
-            (STATISTICS->data)[i]->name, (STATISTICS->data)[i]->average_score, 
+        syslog(LOG_INFO, "     <%s>: Spam score: %.2f | Time: %.2f",
+            (STATISTICS->data)[i]->name, (STATISTICS->data)[i]->average_score,
             (STATISTICS->data)[i]->average_time);
     }
 
@@ -418,7 +444,7 @@ void print_statistics()
 }
 
 /* [Thread-Unsafe] The function that will parse the line loaded from the saved statistics file  */
-bool load_statistic_line(char *line_content) 
+bool load_statistic_line(char* line_content)
 {
     char* name = strtok(line_content, STATISTICS_DELIMITER);
     char* raw_forwarded_emails_counter = strtok(NULL, STATISTICS_DELIMITER);
@@ -429,38 +455,38 @@ bool load_statistic_line(char *line_content)
     char* raw_average_time = strtok(NULL, STATISTICS_DELIMITER);
 
     errno = 0;
-    if (!name || !raw_forwarded_emails_counter || !raw_parsed_email_counter || !raw_super_spam_counter ||
-      !raw_spam_counter || !raw_average_score || !raw_average_time) {
+    if (!name || !raw_forwarded_emails_counter || !raw_parsed_email_counter || 
+        !raw_super_spam_counter || !raw_spam_counter || !raw_average_score || !raw_average_time) {
         return false; // Invalid line in statistics file, skipping (missing part)
     }
 
-    char *end_forwarded_emails_counter; // Parse raw_forwarded_emails_counter as integer
+    char* end_forwarded_emails_counter; // Parse raw_forwarded_emails_counter as integer
     int forwarded_emails_counter = strtol(raw_forwarded_emails_counter, &end_forwarded_emails_counter, 10);
 
-    char *end_parsed_email_counter; // Parse raw_parsed_email_counter as integer
+    char* end_parsed_email_counter; // Parse raw_parsed_email_counter as integer
     int parsed_email_counter = strtol(raw_parsed_email_counter, &end_parsed_email_counter, 10);
 
-    char *end_super_spam_counter; // Parse raw_super_spam_counter as integer
+    char* end_super_spam_counter; // Parse raw_super_spam_counter as integer
     int super_spam_counter = strtol(raw_super_spam_counter, &end_super_spam_counter, 10);
 
-    char *end_spam_counter; // Parse raw_spam_counter as integer
+    char* end_spam_counter; // Parse raw_spam_counter as integer
     int spam_counter = strtol(raw_spam_counter, &end_spam_counter, 10);
 
-    char *end_average_score; // Parse raw_average_score as float
+    char* end_average_score; // Parse raw_average_score as float
     int average_score = strtof(raw_average_score, &end_average_score);
 
-    char *end_average_time; // Parse raw_average_time as float
+    char* end_average_time; // Parse raw_average_time as float
     int average_time = strtof(raw_average_time, &end_average_time);
 
     if (errno != 0 || end_forwarded_emails_counter == raw_forwarded_emails_counter || 
-      end_parsed_email_counter == raw_parsed_email_counter || end_super_spam_counter == raw_super_spam_counter ||
-      end_spam_counter == raw_spam_counter || end_average_score == raw_average_score ||
-      end_average_time == raw_average_time) {
+        end_parsed_email_counter == raw_parsed_email_counter || 
+        end_super_spam_counter == raw_super_spam_counter || end_spam_counter == raw_spam_counter || 
+        end_average_score == raw_average_score || end_average_time == raw_average_time) {
         syslog(LOG_WARNING, "Was not able to load the line from the statistic file: %s. Skipping.", name);
         return false; // Invalid line in statistics, skipping...
     }
 
-    statistics_record_t *record = retrieve_statistics_record(name);
+    statistics_record_t* record = retrieve_statistics_record(name);
     record->name = strdup(name);
     record->forwarded_emails_counter = forwarded_emails_counter;
     record->parsed_email_counter = parsed_email_counter;
@@ -480,7 +506,7 @@ void statistics_load(statistics_t* statistics)
         return;
     }
 
-    char *path = SETTINGS->statistics_path;
+    char* path = SETTINGS->statistics_path;
     FILE* stat_load_fd = fopen(path, "r");
 
     if (!stat_load_fd) {
@@ -495,8 +521,8 @@ void statistics_load(statistics_t* statistics)
     size_t data_length;
 
     while (getline(&line_content, &data_length, stat_load_fd) != EOF) {
-        if(load_statistic_line(line_content)) {
-            loaded_counter++;    
+        if (load_statistic_line(line_content)) {
+            loaded_counter++;
         }
     }
 
@@ -515,7 +541,7 @@ void statistics_load(statistics_t* statistics)
         syslog(LOG_WARNING, "Was not able to remove the old statistics file. Path: %s.", path);
     }
 
-    if(OPTIONS.verbose) {
+    if (OPTIONS.verbose) {
         print_statistics();
     }
 }
@@ -528,7 +554,7 @@ void statistics_save(statistics_t* statistics)
         return;
     }
 
-    char *path = SETTINGS->statistics_path;
+    char* path = SETTINGS->statistics_path;
     FILE* stat_save_fd = fopen(path, "w+");
 
     if (!stat_save_fd) {
@@ -538,10 +564,10 @@ void statistics_save(statistics_t* statistics)
 
     syslog(LOG_DEBUG, "[statistics_save] Starting to save statistics to file: %s.", path);
     for (size_t i = 0; i < statistics->array_size; ++i) {
-        statistics_record_t *record = (statistics->data)[i];
-        fprintf(stat_save_fd, "%s%s%llu%s%llu%s%llu%s%llu%s%.4f%s%.4f\n", record->name, STATISTICS_DELIMITER, 
+        statistics_record_t* record = (statistics->data)[i];
+        fprintf(stat_save_fd, "%s%s%llu%s%llu%s%llu%s%llu%s%.4f%s%.4f\n", record->name, STATISTICS_DELIMITER,
             record->forwarded_emails_counter, STATISTICS_DELIMITER, record->parsed_email_counter, STATISTICS_DELIMITER,
-            record->super_spam_counter, STATISTICS_DELIMITER, record->spam_counter, STATISTICS_DELIMITER, 
+            record->super_spam_counter, STATISTICS_DELIMITER, record->spam_counter, STATISTICS_DELIMITER,
             record->average_score, STATISTICS_DELIMITER, record->average_time);
     }
 
@@ -568,7 +594,7 @@ bool init_statistics()
 
     // This will represent all traffic on the MUNI relay (it will be always on index 0)
     create_new_stat_record("Relay");
-    return (bool) (STATISTICS->data)[0];
+    return (bool)(STATISTICS->data)[0];
 }
 
 /* [Thread-Unsafe] Destroy statistic structure */
@@ -587,18 +613,18 @@ void destroy_statistics()
     }
 
     free(STATISTICS);
-    syslog(LOG_DEBUG, "[destroy_statistics] The statistics were successfully removed from memory. Removed: %ld.", 
+    syslog(LOG_DEBUG, "[destroy_statistics] The statistics were successfully removed from memory. Removed: %ld.",
         STATISTICS->array_size);
 }
 
 /* [Thread-Safe] Evaluate spam category for the sender and update statistics data */
-void update_statistics(statistics_record_t* faculty_record, float time_score, float spam_score, 
+void update_statistics(statistics_record_t* faculty_record, float time_score, float spam_score,
     bool is_forward, spam_type_t evaluated_type)
 {
     statistics_record_t* relay_record = (STATISTICS->data)[0];
 
     pthread_mutex_lock(&DATA_MUTEX);
-    
+
     if (is_forward) {
         relay_record->forwarded_emails_counter++;
         faculty_record->forwarded_emails_counter++;
@@ -640,15 +666,15 @@ void update_statistics(statistics_record_t* faculty_record, float time_score, fl
 /* [Thread-Safe] Safe milter exit */
 void exit_milter(bool is_fail)
 {
-    syslog(LOG_DEBUG, "[exit_milter] Freeing milter resources.");
+    syslog(LOG_DEBUG, "[exit_milter] Freeing Milter resources.");
     free(OPTIONS.config_path);
 
     if (SETTINGS && SETTINGS->save_data) {
         pthread_mutex_lock(&DATA_MUTEX);
-        
+
         db_save(DATABASE);
         statistics_save(STATISTICS);
-        
+
         pthread_mutex_unlock(&DATA_MUTEX);
     }
 
@@ -662,7 +688,7 @@ void exit_milter(bool is_fail)
 
     pthread_mutex_unlock(&DATA_MUTEX);
 
-    syslog(LOG_INFO, "Exiting milter. Goodbye.");
+    syslog(LOG_INFO, "Exiting Milter. Goodbye.");
 
     closelog();
     smfi_stop();
@@ -681,7 +707,7 @@ int main(int argc, char* argv[])
     }
 
     if (OPTIONS.verbose && smfi_setdbg(SETTINGS->milter_debug_level) != MI_SUCCESS) {
-        syslog(LOG_ERR, "Was not able to turn on debug for milter.");
+        syslog(LOG_ERR, "Was not able to turn on debug for Milter.");
         exit_milter(true);
     }
 
@@ -744,7 +770,7 @@ int main(int argc, char* argv[])
 
     int return_value = smfi_main();
     if (return_value != MI_SUCCESS) {
-        syslog(LOG_ERR, "Was not able to run the milter main function.");
+        syslog(LOG_ERR, "Was not able to run the Milter main function.");
         exit_milter(true);
     }
     return return_value;
@@ -801,11 +827,11 @@ sfsistat mlfi_connect(SMFICTX* ctx, char* hostname, _SOCK_ADDR* hostaddr)
     }
 
     syslog(LOG_DEBUG, "[mlfi_connect] Empty data structure. Starting initialization.");
-    
+
     pthread_mutex_lock(&DATA_MUTEX);
-    
+
     private_data_t* data = malloc(sizeof(private_data_t));
-    
+
     pthread_mutex_unlock(&DATA_MUTEX);
 
     if (!data) {
@@ -818,7 +844,7 @@ sfsistat mlfi_connect(SMFICTX* ctx, char* hostname, _SOCK_ADDR* hostaddr)
     if (!init_private_data(ctx, data)) {
         return SMFIS_TEMPFAIL;
     }
-    
+
     pthread_mutex_unlock(&DATA_MUTEX);
 
     syslog(LOG_DEBUG, "[mlfi_connect] Milter successfully established a connection. Hostname: %s", hostname);
@@ -902,7 +928,7 @@ sfsistat mlfi_envrcpt(SMFICTX* ctx, char** envrcpt)
 sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
 {
     syslog(LOG_DEBUG, "[mlfi_header] Starting to parse %s : %s", headerf, headerv);
-    
+
     private_data_t* data = smfi_getpriv(ctx);
     if (!data) {
         syslog(LOG_ERR, "Was not able to load private data. Rejecting connection from 'mlfi_header'.");
@@ -951,7 +977,7 @@ sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
         pthread_mutex_unlock(&DATA_MUTEX);
         return SMFIS_CONTINUE;
     }
-    
+
     if (!strcmp(headerf, HEADER_INFO)) { // Debug print informing about repeated pass through our Milter
         syslog(LOG_DEBUG, "[mlfi_header] The email was already seen by the MUNI relay. Info: %s", headerv);
         return SMFIS_CONTINUE;
@@ -963,7 +989,7 @@ sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
         pthread_mutex_unlock(&DATA_MUTEX);
         return SMFIS_CONTINUE;
     }
-    
+
     if (!strcmp(headerf, HEADER_FROM)) { // Header FROM
         pthread_mutex_lock(&DATA_MUTEX);
         data->header_from = strdup(headerv);
@@ -993,7 +1019,7 @@ sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
 sfsistat mlfi_eoh(SMFICTX* ctx)
 {
     syslog(LOG_DEBUG, "[mlfi_eoh] Entering function 'mlfi_eoh'. The header was successfully parsed.");
-    
+
     private_data_t* data = smfi_getpriv(ctx);
     if (!data) {
         syslog(LOG_ERR, "Was not able to load private data. Rejecting connection from 'mlfi_eoh'.");
@@ -1006,21 +1032,22 @@ sfsistat mlfi_eoh(SMFICTX* ctx)
     }
 
     if (data->header_quarantine) {
-        syslog(LOG_DEBUG, "[mlfi_eoh] The email was already marked as super-spam (forward). Email ID: %s", 
+        syslog(LOG_DEBUG, "[mlfi_eoh] The email was already marked as super-spam (forward). Email ID: %s",
             data->email_id);
     }
 
     if (data->spam_score == -1) {
         syslog(LOG_WARNING, "Was not able to find the spam assassin score in the header of the email.");
-        
+
         pthread_mutex_lock(&DATA_MUTEX);
         data->spam_score = SETTINGS->dry_run ? 0 : 15;
         pthread_mutex_unlock(&DATA_MUTEX);
     }
 
     if (data->forward_counter != 0) {
-        syslog(LOG_DEBUG, "[mlfi_eoh] Forward through MUNI relay was detected. Forward counter: %d.", data->forward_counter);
-        
+        syslog(LOG_DEBUG, "[mlfi_eoh] Forward through MUNI relay was detected. Forward counter: %d.",
+            data->forward_counter);
+
         pthread_mutex_lock(&DATA_MUTEX);
         data->is_forward = true;
         pthread_mutex_unlock(&DATA_MUTEX);
@@ -1058,7 +1085,7 @@ sfsistat mlfi_cleanup(SMFICTX* ctx, sfsistat return_value)
 {
     private_data_t* data = smfi_getpriv(ctx);
     syslog(LOG_DEBUG, "[mlfi_cleanup] Entering function 'mlfi_cleanup'. Starting cleanup.");
-    
+
     pthread_mutex_lock(&DATA_MUTEX);
     if (data) {
         free(data->sender_hostname);
@@ -1083,52 +1110,12 @@ sfsistat mlfi_cleanup(SMFICTX* ctx, sfsistat return_value)
     return return_value;
 }
 
-
-
-
-//TODO refactor
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/* End of the message */
+/* End of the message | NOTE: I do not advise decompose this function */
 sfsistat mlfi_eom(SMFICTX* ctx)
 {
     syslog(LOG_DEBUG, "[mlfi_eom] Entering function 'mlfi_eom'.");
-    private_data_t* data = smfi_getpriv(ctx);
 
+    private_data_t* data = smfi_getpriv(ctx);
     if (!data) {
         syslog(LOG_ERR, "Was not able to load private data. Rejecting connection from 'mlfi_eom'.");
         return SMFIS_TEMPFAIL;
@@ -1142,31 +1129,17 @@ sfsistat mlfi_eom(SMFICTX* ctx)
     data->is_local = check_is_local(original_addr_from) && check_is_local(original_addr_to);
     pthread_mutex_unlock(&DATA_MUTEX);
 
-    if (data->is_forward && data->is_local) {
-        syslog(LOG_WARNING, "Local forward. This should not happened. From (original): %s. To: %s.", original_addr_from, original_addr_to);
-        return SMFIS_TEMPFAIL;
+    if (is_whitelisted(data->sender_hostname, SETTINGS) || is_whitelisted(original_addr_from, SETTINGS)) {
+        syslog(LOG_DEBUG, "[mlfi_eom] The hostname was found in the whitelist, skipping. ID: %s.", data->email_id);
+        set_header(ctx, HEADER_SPECIAL, "WHITELISTED");
+        goto eom_finish;
     }
 
     if (is_blacklisted(data->sender_hostname, SETTINGS) || is_blacklisted(original_addr_from, SETTINGS)) {
+        syslog(LOG_DEBUG, "[mlfi_eom] The host is on the blacklist, blocking. ID: %s.", data->email_id);
         set_header(ctx, HEADER_SPECIAL, "BLACKLISTED");
-        syslog(LOG_DEBUG, "[mlfi_eom] Email is in the blacklist, blocking. Email ID: %s.", data->email_id);
-        if (!SETTINGS->dry_run) {
-            if (smfi_quarantine(ctx, "Blacklisted email") == MI_FAILURE) {
-                syslog(LOG_ERR, "Was not able to mark email %s as blacklisted. Hostname: %s.", data->email_id, data->sender_hostname);
-            }
-            if (ALLOW_REPLY) {
-                if (smfi_setmlreply(ctx, "403", "5.7.0", "Blacklisted email", NULL) == MI_FAILURE) {
-                    syslog(LOG_ERR, "Was not able to send multi-line messages for email %s (Hostname: %s).", data->email_id, data->sender_hostname);
-                }
-            }
-        }
-        goto eom_finish; // We need to set headers for blacklisted email
-    }
-
-    if (is_whitelisted(data->sender_hostname, SETTINGS) || is_whitelisted(original_addr_from, SETTINGS)) {
-        syslog(LOG_DEBUG, "[mlfi_eom] Sender hostname was found in the whitelist, skipping check. Email ID: %s.", data->email_id);
-        set_header(ctx, HEADER_SPECIAL, "WHITELISTED");
-        goto eom_finish; // We need to set headers for whitelisted email
+        block_email(ctx, data, "Blacklisted host", "403", false);
+        goto eom_finish;
     }
 
     char* temp_email_id = remove_brackets(smfi_getsymval(ctx, "{msg_id}"), '<', '>');
@@ -1179,66 +1152,58 @@ sfsistat mlfi_eom(SMFICTX* ctx)
     syslog(LOG_DEBUG, "[mlfi_eom] Unique ID was matched with: %s", data->email_id);
     free(temp_email_id);
 
-    int amount_of_trips = data->forward_counter + 1;
-    if (amount_of_trips >= SETTINGS->forward_counter_limit) {
-        syslog(LOG_ERR, "Something is probably wrong with the email path. Forward counter: %d", amount_of_trips);
+    if (data->forward_counter + 1 >= SETTINGS->forward_counter_limit) {
+        syslog(LOG_ERR, "Something is probably wrong with the email path. Forward counter: %d",
+            (data->forward_counter + 1));
         return SMFIS_TEMPFAIL;
     }
 
-    char temp_trip_value[16];
-    sprintf(temp_trip_value, "%d", amount_of_trips);
+    char temp_trip_value[16]; // Forward counter representation
+    sprintf(temp_trip_value, "%d", data->forward_counter + 1);
     set_header(ctx, HEADER_FORWARD_COUNTER, temp_trip_value);
 
-    // It does not exist a new record will be created in DB
-    entry_t* entry = db_get(DATABASE, data->sender_hostname);
-
     char* faculty_server_name = get_faculty_name(original_addr_from, original_addr_to);
+    entry_t* entry = db_get(DATABASE, data->sender_hostname); // Create a new one if does not exist
     statistics_record_t* faculty_record = retrieve_statistics_record(faculty_server_name);
-    time_t time_now = time(0);
-    float email_time_score = fabs((float)difftime(entry->last_email, time_now));
+    statistics_record_t* relay_record = (STATISTICS->data)[0];
+    time_t t_now = time(0); // Get current timestamp
+    float email_time_diff = !faculty_record->parsed_email_counter ? 0 : fabs((float)difftime(entry->last_email, t_now));
 
     pthread_mutex_lock(&(DATABASE->mutex_value));
-    entry->average_time = (entry->average_time * entry->email_count + email_time_score) / (entry->email_count + 1);
+
+    entry->average_time = (entry->average_time * entry->email_count + email_time_diff) / (entry->email_count + 1);
     entry->average_score = (entry->average_score * entry->email_count + data->spam_score) / (entry->email_count + 1);
-    entry->last_email = time_now;
+    entry->last_email = t_now;
     entry->email_count++;
+
     pthread_mutex_unlock(&(DATABASE->mutex_value));
 
-    if (entry->average_score > SETTINGS->spam_limit || entry->average_score * (1 + SETTINGS->score_percentage_spam) > faculty_record->average_score || entry->average_time * (1 + SETTINGS->time_percentage_spam) > faculty_record->average_time) {
-        syslog(LOG_WARNING, "Spam level was reached for email: %s.", data->email_id);
-        result_type = SPAM;
-    }
-
-    if (entry->average_score > SETTINGS->super_spam_limit || entry->average_score * (1 + SETTINGS->score_percentage_super_spam) > faculty_record->average_score || entry->average_time * (1 + SETTINGS->time_percentage_super_spam) > faculty_record->average_time) {
-        syslog(LOG_WARNING, "Super-spam level was reached for email: %s.", data->email_id);
-        result_type = SUPERSPAM;
-    }
+    result_type = evaluate_result_type(result_type, entry, faculty_record, data);
 
     // We do not want to include whitelisted or blacklisted emails in our statistics
-    update_statistics(faculty_record, email_time_score, data->spam_score, data->is_forward, result_type);
+    update_statistics(faculty_record, email_time_diff, data->spam_score, data->is_forward, result_type);
 
     // Forwarded email
-    if (result_type > SPAM && entry->average_score * (1 + SETTINGS->forward_percentage_limit) > (STATISTICS->data)[0]->average_score) {
+    if (result_type >= SPAM && entry->average_score * (1 + SETTINGS->forward_percentage_limit) > relay_record->average_score) {
         syslog(LOG_WARNING, "Forwarded email from %s reached spam limit. ID: %s.", original_addr_from, data->email_id);
-        mark_as_spam(ctx, data);
+        block_email(ctx, data, "Spammer access rejected", "550", false);
         goto eom_finish;
     }
 
     // Authenticated user
-    if (data->is_auth && result_type > SPAM) {
-        syslog(LOG_WARNING, "Auth user from %s reached spam level (%s).", original_addr_from, data->email_id);
-        mark_as_spam(ctx, data);
+    if (data->is_auth && result_type >= SPAM) {
+        syslog(LOG_WARNING, "Auth. user from %s reached spam level (%s).", original_addr_from, data->email_id);
+        block_email(ctx, data, "Spammer access rejected", "550", true);
         goto eom_finish;
     }
 
     // If it is a local email probably it is some kind of newsletter
-    if (result_type == SUPERSPAM && !data->is_local) {
+    if (result_type == SUPERSPAM && (!data->is_local || !ALLOW_NEWSLETTERS)) {
         syslog(LOG_WARNING, "The sender that send email %s was marked as a super-spammer.", data->email_id);
-        mark_as_spam(ctx, data);
+        block_email(ctx, data, "Spammer access rejected", "550", false);
     }
 
 eom_finish:;
-
     set_header(ctx, HEADER_QUARANTINE, result_type == SUPERSPAM ? "Yes" : "No");
     set_header(ctx, HEADER_IS_AUTH, data->is_auth ? "Yes" : "No");
     set_header(ctx, HEADER_IS_FORWARD, data->is_forward ? "Yes" : "No");
@@ -1250,10 +1215,8 @@ eom_finish:;
     sprintf(temp_info_value, "%s version: %s made by %s", MILTER_NAME, VERSION, AUTHOR);
     set_header(ctx, HEADER_INFO, temp_info_value);
 
-    syslog(LOG_INFO, "Message from %s to %s passed milter.", original_addr_from, data->to);
-    syslog(LOG_DEBUG, "[mlfi_eom] All changes at the end of the message were made. Email ID: %s", data->email_id);
+    syslog(LOG_INFO, "Message from %s to %s passed MUNI-Milter.", original_addr_from, data->to);
+    syslog(LOG_DEBUG, "[mlfi_eom] All changes at the end of the message were made. ID: %s", data->email_id);
 
     return mlfi_cleanup(ctx, SMFIS_CONTINUE);
 }
-
-
