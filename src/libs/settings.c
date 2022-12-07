@@ -211,9 +211,9 @@ bool verify_settings_integrity(settings_t* settings, int assign_counter)
         syslog(LOG_WARNING, "The size of the hash table is %d, this makes the database slow (linear access). Higher is better.", settings->hash_table_size);
     }
 
-    if (settings->whitelist && settings->blacklist) {
-        for (int i_white = 0; i_white <= settings->whitelist_len; i_white++) {
-            for (int i_black = 0; i_black <= settings->blacklist_len; i_black++) {
+    if (settings->whitelist_len > 0 && settings->blacklist_len > 0) {
+        for (int i_white = 0; i_white < settings->whitelist_len; i_white++) {
+            for (int i_black = 0; i_black < settings->blacklist_len; i_black++) {
                 if (!strcmp(settings->whitelist[i_white], settings->blacklist[i_black])) {
                     syslog(LOG_ERR, "Address %s was found in the whitelist, but also the blacklist. This is unwanted behavior.", settings->blacklist[i_black]);
                     return false;
@@ -257,7 +257,7 @@ char** parse_list_value(char* value, char* list_name, int* list_len)
         return NULL;
     }
 
-    int to_allocate_blocks = 0;
+    int to_allocate_blocks = 1;
     for (int i = 0; value[i] != '\0'; i++) {
         if (value[i] == LIST_DELIMITER && value[i + 1] != '\0') {
             to_allocate_blocks++;
@@ -268,7 +268,7 @@ char** parse_list_value(char* value, char* list_name, int* list_len)
         return NULL;
     }
 
-    syslog(LOG_DEBUG, "[parse_list_value] Found %d IP/DNS in %s, allocating memory blocks.", to_allocate_blocks, list_name);
+    syslog(LOG_DEBUG, "[parse_list_value] Found %d IP/DNS/email in %s, allocating memory blocks.", to_allocate_blocks, list_name);
 
     char** list = malloc(sizeof(char*) * to_allocate_blocks);
     if (!list) {
@@ -362,6 +362,7 @@ settings_t* settings_init(char* config_path)
     settings->forward_counter_limit = 0;
     settings->forward_percentage_limit = 0;
     settings->socket_path = NULL;
+    settings->statistics_path = NULL;
     settings->blacklist = NULL;
     settings->whitelist = NULL;
     settings->blacklist_len = 0;
@@ -456,15 +457,19 @@ void settings_destroy(settings_t* settings)
         free(settings->statistics_path);
         free(settings->socket_path);
 
-        for (int i = 0; i < settings->blacklist_len; i++) {
-            free(settings->blacklist[i]);
+        if(!settings->blacklist) {
+            for (int i = 0; i < settings->blacklist_len; i++) {
+                free(settings->blacklist[i]);
+            }
+            free(settings->blacklist);
         }
-        free(settings->blacklist);
 
-        for (int i = 0; i < settings->whitelist_len; i++) {
-            free(settings->whitelist[i]);
+        if(!settings->whitelist) {
+            for (int i = 0; i < settings->whitelist_len; i++) {
+                free(settings->whitelist[i]);
+            }
+            free(settings->whitelist);
         }
-        free(settings->whitelist);
     }
 
     free(settings);
@@ -563,8 +568,10 @@ bool cmp_email_dns(char* address, char* domain)
 /* [Thread-Safe] Abstraction for functions 'is_whitelisted' and 'is_blacklisted' */
 bool contains_address(char* address, int array_length, char** array, char* array_name)
 {
-    syslog(LOG_DEBUG, "[check_if_array_contains] Checking if IP/DNS/email %s is in %s", address, array_name);
+    syslog(LOG_DEBUG, "[check_if_array_contains] Checking if IP/DNS/email %s is in %s (%d)", 
+        address, array_name, array_length);
     for (int i = 0; i < array_length; i++) {
+        syslog(LOG_DEBUG, "Validating %s with our %s in %s.", address, array[i], array_name);
         if (!strcmp(address, array[i]) || contains_subaddress(address, array[i]) || cmp_email_dns(address, array[i])) {
             syslog(LOG_DEBUG, "[check_if_array_contains] IP/DNS/email %s was found in %s.", address, array_name);
             return true;
