@@ -17,6 +17,7 @@
 # FILENAME:    Makefile
 # DESCRIPTION: Makefile manager
 # AUTHOR:      Patrik Čelko
+# REPOSITORY:  https://github.com/patrikcelko/MUNI-Milter
 #
 #****************************************************************************************
 

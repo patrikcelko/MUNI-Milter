@@ -18,6 +18,7 @@
  * DESCRIPTION:	Header file for the config parser for Milter.
  * NOTES:		This lib is part of the MUNI-Milter, and will not work on its own.
  * AUTHOR:		Patrik Čelko
+ * REPOSITORY:  https://github.com/patrikcelko/MUNI-Milter
  *
  *****************************************************************************************/
 

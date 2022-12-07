@@ -18,6 +18,7 @@
  * DESCRIPTION: Implementation of the Milter.
  * NOTES:       This Milter will need additional libs (settings, database) to run.
  * AUTHOR:      Patrik Čelko
+ * REPOSITORY:  https://github.com/patrikcelko/MUNI-Milter
  *
  *****************************************************************************************/
 
