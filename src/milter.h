@@ -10,6 +10,13 @@
 #ifndef MILTER_H
 #define MILTER_H
 
+/* Senders category */
+enum spam_type {
+    NORMAL,
+    SPAM,
+    SUPERSPAM
+};
+
 /* Options structure */
 struct options {
     bool daemon;
@@ -17,12 +24,25 @@ struct options {
     char* config_path;
 };
 
+/* Representation of the statistics record */
+struct statistic_record {
+    char* name; // Name of the record (relay or faculty server name)
+    unsigned long long int forwarded_emails_counter;
+    unsigned long long int parsed_email_counter;
+    unsigned long long int super_spam_counter;
+    unsigned long long int spam_counter;
+    float average_score;
+    float average_time;
+};
+
+typedef struct statistic_record statistics_record_t;
+
 /* Milter statistics structure */
 struct statistics {
-    unsigned long long int hard_limit_counter;
-    unsigned long long int soft_limit_counter;
-    unsigned long long int marked_as_spam_counter;
-    unsigned long long int parsed_email_counter;
+    size_t array_size;
+    // An array containing all statistics records.
+    // We can assume that we would not have more than 256 records.
+    statistics_record_t* data[256];
 };
 
 /* Email information structure */
@@ -32,7 +52,6 @@ struct private_data {
     bool is_auth; // [mlfi_envfrom] True if a user is authenticated
     bool header_quarantine; // [mlfi_header] Value from header - Was marked as dangerous email
     int forward_counter; // [mlfi_header] How many times was email seen?
-    int header_score; // [mlfi_header] Value from header - Score from previews runs through milter
     float spam_score; // [mlfi_header] Spam assassin score
     char* sender_hostname; // [mlfi_connect] Sender IP or DNS
     char* email_id; // [mlfi_header] Email ID
@@ -46,6 +65,11 @@ struct private_data {
 typedef struct options options_t;
 typedef struct private_data private_data_t;
 typedef struct statistics statistics_t;
+typedef enum spam_type spam_type_t;
+
+/* Misc functions */
+void exit_milter(bool is_fail);
+void print_statistics();
 
 /* Cleanup after the connection is closed */
 sfsistat mlfi_cleanup(SMFICTX* ctx, sfsistat return_value);

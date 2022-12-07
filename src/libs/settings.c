@@ -43,7 +43,7 @@
 static char DEFAULT_PATH[] = "./config.cfg";
 static char CONFIG_DELIMITER[] = "=";
 static char LIST_DELIMITER = ';';
-static int AMOUNT_OF_CONFIG_LINES = 18;
+static int AMOUNT_OF_CONFIG_LINES = 19;
 
 /* [Thread-Safe] Fill the newly created config file with default values */
 void fill_empty_config(FILE* config_fd)
@@ -51,14 +51,16 @@ void fill_empty_config(FILE* config_fd)
     fprintf(config_fd, "\
 ## Run Milter, but do not make any changes during a run. DEFAULT: false\n\
 dry_run=false\n\
-## Save the whole database to an external file after the exit call. DEFAULT: true\n\
-save_database=true\n\
-## The path where should be stored database. Used when 'save_database' is allowed. DEFAULT: ./db.data\n\
+## Save the whole database and statistics to an external file after the exit call. DEFAULT: true\n\
+save_data=true\n\
+## The path where should be stored database. Used when 'save_data' is allowed. DEFAULT: ./db.data\n\
 database_path=./db.data\n\
-## The hard limit for the average spam score to be marked as super-spam. DEFAULT: 20\n\
-super_spam_limit=20\n\
-## The hard limit for the average spam score to be marked as spam. DEFAULT: 12\n\
-spam_limit=12\n\
+## The path where should be stored statistics. Used when 'save_data' is allowed. DEFAULT: ./stat.data\n\
+statistics_path=./stat.data\n\
+## Limit after which will email possible to mark as super-spam. DEFAULT: 6\n\
+super_spam_limit=6\n\
+## Limit after which will email possible to mark as spam. DEFAULT: 2\n\
+spam_limit=2\n\
 ## How much info should milter print? DEFAULT: 0 | MAX: 6\n\
 milter_debug_level=0\n\
 ## Size of the hash table where will be stored data about emails. DEFAULT: 2000000\n\
@@ -67,17 +69,17 @@ hash_table_size=200000\n\
 clean_interval=2400\n\
 ## The time after which the record in the database expires. DEFAULT: 600 | 5 min.\n\
 max_save_time=600\n\
-# How much percent can the difference between the faculty average time and the sender's average which will be categorized as spam? DEFAULT: 50 (%)\n\
-time_percentage_spam=5\n\
-# How much percent can the difference between the faculty average time and the sender's average which will be categorized as super-spam? DEFAULT: 75 (%)\n\
+# How much percent can the difference between the faculty average time and the sender's average which will be categorized as spam? DEFAULT: 50\n\
+time_percentage_spam=50\n\
+# How much percent can the difference between the faculty average time and the sender's average which will be categorized as super-spam? DEFAULT: 75\n\
 time_percentage_super_spam=75\n\
-## After how much percent above faculty average should be sender marked to the category spam? DEFAULT: 15 (%)\n\
+## After how much percent above faculty average should be sender marked to the category spam? DEFAULT: 15\n\
 score_percentage_spam=15\n\
-## After how much percent above faculty average should be sender marked to the category super-spam? DEFAULT: 30 (%)\n\
-score_percentage_super_spam=15\n\
+## After how much percent above faculty average should be sender marked to the category super-spam? DEFAULT: 30\n\
+score_percentage_super_spam=30\n\
 ## Limit how many times can email pass relay. DEFAULT: 20\n\
 forward_counter_limit=20\n\
-## After how much percent above the relay average should forward blocked? DEFAULT: 15 (%)
+## After how much percent above the relay average should forward blocked? DEFAULT: 15\n\
 forward_percentage_limit=15\n\
 ## The path where should be stored socket for communication with Sendmail (Do not use the default one). DEFAULT: local:/tmp/f1.sock\n\
 socket_path=local:/tmp/f1.sock\n\
@@ -131,8 +133,13 @@ bool verify_settings_integrity(settings_t* settings, int assign_counter)
         return false;
     }
 
-    if (settings->save_database && (!settings->database_path || settings->database_path[0] == '\0')) {
+    if (settings->save_data && (!settings->database_path || settings->database_path[0] == '\0')) {
         syslog(LOG_ERR, "Database saving is turned on, but the database path is invalid.");
+        return false;
+    }
+
+    if (settings->save_data && (!settings->statistics_path || settings->statistics_path[0] == '\0')) {
+        syslog(LOG_ERR, "Statistics saving is turned on, but the database path is invalid.");
         return false;
     }
 
@@ -140,14 +147,14 @@ bool verify_settings_integrity(settings_t* settings, int assign_counter)
         syslog(LOG_ERR, "Percentage limits must be a positive integer. Now: Time -> (%.0f | %.0f) & Spam -> (%.0f | %.0f)",
             settings->time_percentage_spam * 100, settings->time_percentage_super_spam * 100, settings->score_percentage_spam * 100,
             settings->score_percentage_super_spam * 100);
-        return false
+        return false;
     }
 
     if (settings->time_percentage_spam >= settings->time_percentage_super_spam || settings->score_percentage_spam >= settings->score_percentage_super_spam) {
         syslog(LOG_ERR, "The percentage for super-spam must be bigger than spam. Now: Time -> (%.0f | %.0f) & Spam -> (%.0f | %.0f)",
             settings->time_percentage_spam * 100, settings->time_percentage_super_spam * 100, settings->score_percentage_spam * 100,
             settings->score_percentage_super_spam * 100);
-        return false
+        return false;
     }
 
     if (settings->forward_percentage_limit <= 0) {
@@ -340,7 +347,7 @@ settings_t* settings_init(char* config_path)
     syslog(LOG_DEBUG, "[settings_init] The file descriptor for the config was successfully created.");
 
     settings->dry_run = false;
-    settings->save_database = false;
+    settings->save_data = false;
     settings->database_path = NULL;
     settings->super_spam_limit = 0;
     settings->spam_limit = 0;
@@ -377,13 +384,13 @@ settings_t* settings_init(char* config_path)
         syslog(LOG_DEBUG, "[settings_init] Key %s was found in the config with value %s.", key, value);
 
         if (!strcmp(key, "score_percentage_super_spam")) {
-            settings->score_percentage_super_spam = parse_float_value(value) / 100;
+            settings->score_percentage_super_spam = parse_float_value(value, key) / 100;
         } else if (!strcmp(key, "score_percentage_spam")) {
-            settings->score_percentage_spam = parse_float_value(value) / 100;
+            settings->score_percentage_spam = parse_float_value(value, key) / 100;
         } else if (!strcmp(key, "time_percentage_super_spam")) {
-            settings->time_percentage_super_spam = parse_float_value(value) / 100;
+            settings->time_percentage_super_spam = parse_float_value(value, key) / 100;
         } else if (!strcmp(key, "time_percentage_spam")) {
-            settings->time_percentage_spam = parse_float_value(value) / 100;
+            settings->time_percentage_spam = parse_float_value(value, key) / 100;
         } else if (!strcmp(key, "max_save_time")) {
             settings->max_save_time = parse_number_value(value, key);
         } else if (!strcmp(key, "forward_percentage_limit")) {
@@ -394,8 +401,8 @@ settings_t* settings_init(char* config_path)
             settings->forward_counter_limit = parse_number_value(value, key);
         } else if (!strcmp(key, "dry_run")) {
             settings->dry_run = parse_bool_value(value);
-        } else if (!strcmp(key, "save_database")) {
-            settings->save_database = parse_bool_value(value);
+        } else if (!strcmp(key, "save_data")) {
+            settings->save_data = parse_bool_value(value);
         } else if (!strcmp(key, "super_spam_limit")) {
             settings->super_spam_limit = parse_number_value(value, key);
         } else if (!strcmp(key, "spam_limit")) {
@@ -406,6 +413,8 @@ settings_t* settings_init(char* config_path)
             settings->hash_table_size = parse_number_value(value, key);
         } else if (!strcmp(key, "database_path")) {
             settings->database_path = strdup(value);
+        } else if (!strcmp(key, "statistics_path")) {
+            settings->statistics_path = strdup(value);
         } else if (!strcmp(key, "socket_path")) {
             settings->socket_path = strdup(value);
         } else if (!strcmp(key, "blacklist")) {
@@ -444,6 +453,7 @@ void settings_destroy(settings_t* settings)
     syslog(LOG_DEBUG, "[settings_destroy] Destroying setting structure and freeing resources.");
     if (settings) {
         free(settings->database_path);
+        free(settings->statistics_path);
         free(settings->socket_path);
 
         for (int i = 0; i < settings->blacklist_len; i++) {
@@ -539,11 +549,11 @@ bool contains_subaddress(char* address_A, char* address_B)
 /* [Thread-Safe] Compare the email DNS part if matches with the domain in the whitelist/blacklist */
 bool cmp_email_dns(char* address, char* domain)
 {
-    strtok(st, "@"); // User part, which can we just ignore
+    strtok(address, "@"); // User part, which can we just ignore
     char* email_domain_part = strtok(NULL, "@");
     char* other = strtok(NULL, "@");
 
-    if (other || !domain_part) {
+    if (other || !email_domain_part) {
         return false; // Invalid email
     }
 

@@ -65,12 +65,14 @@ database_t* db_construct(pthread_mutex_t mutex_value, settings_t* settings)
 
     database_t* db_instance = malloc(sizeof(database_t));
     if (!db_instance) {
-        syslog(LOG_ERR, "Was not able to allocate memory for the database instance.") return NULL;
+        syslog(LOG_ERR, "Was not able to allocate memory for the database instance.");
+        return NULL;
     }
 
     db_instance->data = malloc(sizeof(entry_t*) * settings->hash_table_size);
     if (!db_instance->data) {
-        syslog(LOG_ERR, "Was not able to allocate memory for the database hash table.") return NULL;
+        syslog(LOG_ERR, "Was not able to allocate memory for the database hash table.");
+        return NULL;
     }
 
     for (int i = 0; i < settings->hash_table_size; i++) {
@@ -148,7 +150,7 @@ entry_t* create_new_entry(char* key, database_t* db_instance)
 
     strcpy(entry->key, key); // Save the key (address) to our struct
 
-    entry->last_email = NULL;
+    entry->last_email = 0;
     entry->email_count = 0;
     entry->average_time = 0;
     entry->average_score = 0;
@@ -162,7 +164,7 @@ entry_t* create_new_entry(char* key, database_t* db_instance)
 }
 
 /* [Thread-Safe] Recursion function for 'db_get' */
-entry_t* get_entry_recursion(entry_t* entry, char* addr_to_search)
+entry_t* get_entry_recursion(entry_t* entry, char* addr_to_search, database_t* db_instance)
 {
     if (!strcmp(entry->key, addr_to_search)) {
         syslog(LOG_DEBUG, "[get_entry_recursion] The record for key %s was successfully found.", addr_to_search);
@@ -170,7 +172,7 @@ entry_t* get_entry_recursion(entry_t* entry, char* addr_to_search)
     }
 
     if (entry->next) {
-        return get_entry_recursion(entry->next, addr_to_search);
+        return get_entry_recursion(entry->next, addr_to_search, db_instance);
     }
 
     syslog(LOG_DEBUG, "[get_entry_recursion] Was not able to find key %s (out of buckets).", addr_to_search);
@@ -194,9 +196,10 @@ entry_t* db_get(database_t* db_instance, char* addr_to_search)
     if (!entry) {
         syslog(LOG_DEBUG, "[db_get] The record for key %s does not exist (the first bucket does not exist).", addr_to_search);
         entry = create_new_entry(addr_to_search, db_instance);
+        db_instance->data[record_index] = entry;
         return entry;
     }
-    return get_entry_recursion(entry, addr_to_search);
+    return get_entry_recursion(entry, addr_to_search, db_instance);
 }
 
 /* [Thread-Unsafe] Recursion function for 'db_save_recusrion' */
@@ -285,7 +288,7 @@ void db_load(database_t* db_instance)
         char* raw_average_time = strtok(NULL, DATABASE_DELIMITER);
         char* raw_average_score = strtok(NULL, DATABASE_DELIMITER);
 
-        if (!key || !email_count || !average_time || !average_score) {
+        if (!key || !raw_email_count || !raw_average_time || !raw_average_score) {
             continue; // Invalid line in saved database, skipping (missing part)
         }
 
@@ -354,7 +357,7 @@ void db_cleanup_recursion(entry_t* entry, entry_t* prev_entry, database_t* db_in
     (*actual_counter)++;
     pthread_mutex_unlock(&db_instance->mutex_value);
 
-    if (fabs((float)difftime(entry->last_email), time(0)) < db_instance->settings_instance->max_save_time) {
+    if (fabs((float)difftime(entry->last_email, time(0))) < db_instance->settings_instance->max_save_time) {
         db_cleanup_recursion(entry->next, entry, db_instance, record_index, actual_counter);
         return;
     }
@@ -364,9 +367,9 @@ void db_cleanup_recursion(entry_t* entry, entry_t* prev_entry, database_t* db_in
 
     db_instance->entry_counter--;
     entry_t* tmp_prev_entry = !prev_entry ? db_instance->data[record_index] : prev_entry->next;
-    tmp_prev_entry = entry->next
+    tmp_prev_entry = entry->next;
 
-                         free(entry);
+    free(entry);
     pthread_mutex_unlock(&db_instance->mutex_value);
 
     db_cleanup_recursion(tmp_prev_entry, !prev_entry ? db_instance->data[record_index] : prev_entry, db_instance, record_index, actual_counter);
@@ -410,7 +413,7 @@ void db_cleanup(database_t* db_instance)
     }
 
     float time_diff = fabs((float)difftime(time(0), db_instance->last_clean));
-    syslog(LOG_DEBUG, "[db_cleanup] Time after the last cleanup: %d (seconds).", time_diff);
+    syslog(LOG_DEBUG, "[db_cleanup] Time after the last cleanup: %.0f (seconds).", time_diff);
 
     if (time_diff <= db_instance->settings_instance->clean_interval) {
         return; // The time difference for cleanup is still under the limit

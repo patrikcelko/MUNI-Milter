@@ -51,7 +51,7 @@ static char VERSION[] = "1.2.0";
 static char AUTHOR[] = "Patrik Celko"; // Email headers do not like 'Č'
 static char MILTER_NAME[] = "MUNI-Milter";
 static char OPTSTRING[] = "hVvdc:";
-static bool ALLOW_REPLY = false; // This can be set to true to send reply messages about quarantine
+static bool ALLOW_REPLY = true; // This can be set to true to send reply messages about quarantine
 static bool ALLOW_NEWSLETTERS = true;
 static char STATISTICS_DELIMITER[] = ";";
 
@@ -63,7 +63,7 @@ static char HEADER_QUARANTINE[] = "X-MUNI-Quarantine"; // HEADER: Should email g
 static char HEADER_INFO[] = "X-MUNI-Info"; // HEADER: Information about Milter
 static char HEADER_IS_AUTH[] = "X-MUNI-Auth"; // HEADER: Is the user authenticated?
 static char HEADER_IS_FORWARD[] = "X-MUNI-Forward"; // HEADER: Is it forward?
-static char HEADER_SPAM[] = "X-Spam-Status"; // HEADER: X-Spam-Flag will be yes if > 5
+static char HEADER_SPAM[] = "X-Spam-Level"; // HEADER: X-Spam-Flag will be yes if > 5
 static char HEADER_IS_LOCAL[] = "X-MUNI-Local"; // HEADER: Is it in the MUNI network?
 static char HEADER_SUBJECT[] = "Subject"; // HEADER: Email subject
 static char HEADER_ID[] = "Message-Id"; // HEADER: Email ID
@@ -98,7 +98,7 @@ static struct option longopts[] = {
 struct smfiDesc milter_struct = {
     MILTER_NAME,
     SMFI_VERSION,
-    SMFIF_ADDHDRS | SMFIF_QUARANTINE | SMFIF_CHGBODY | SMFIF_CHGHDRS,
+    SMFIF_QUARANTINE | SMFIF_ADDHDRS | SMFIF_CHGBODY | SMFIF_CHGHDRS,
     mlfi_connect,
     NULL, // Not-Used: HELO command, not reliable
     mlfi_envfrom,
@@ -238,6 +238,8 @@ void set_header(SMFICTX* ctx, char* headerf, char* headerv)
 /* [Thread-Safe] Mark selected email as spam */
 void block_email(SMFICTX* ctx, private_data_t* data, char* message, char* code, bool force_reply)
 {
+    syslog(LOG_DEBUG, "[block_email] Blocking email: %s", data->email_id);
+
     if (SETTINGS->dry_run) {
         syslog(LOG_DEBUG, "[block_email] The email was blocked in dry-run mode. ID: %s.", data->email_id);
         return; // In dry-run mode, we do not want to affect emails
@@ -262,17 +264,36 @@ spam_type_t evaluate_result_type(spam_type_t orig_res, entry_t* entry,
     statistics_record_t* faculty_record, private_data_t* data)
 {
     spam_type_t result = NORMAL;
+    syslog(LOG_DEBUG, "[evaluate_result_type] Entering evaluator. Data: %.2f / %.2f.",
+        faculty_record->average_score, faculty_record->average_time);
 
-    if (entry->average_score > SETTINGS->spam_limit || 
-        entry->average_score * (1 + SETTINGS->score_percentage_spam) > faculty_record->average_score || 
-        entry->average_time * (1 + SETTINGS->time_percentage_spam) > faculty_record->average_time) {
+    if(faculty_record->average_score == 0 || faculty_record->average_time == 0) {
+        return orig_res;
+    }
+
+    float time_spam_limit = faculty_record->average_time * SETTINGS->time_percentage_spam;
+    float score_spam_limit = faculty_record->average_score * (1 + SETTINGS->score_percentage_spam);
+
+    syslog(LOG_DEBUG, "[evaluate_result_type] Starting spam evaluation.");
+    syslog(LOG_DEBUG, "[evaluate_result_type] Time: %.2f, Score: %.2f, Our time: %.2f, Our score: %.2f Set_limit: %.2d",
+        time_spam_limit, score_spam_limit, entry->average_time, entry->average_score, SETTINGS->spam_limit);
+
+    if ((entry->average_score > SETTINGS->spam_limit && score_spam_limit < entry->average_score) || 
+        time_spam_limit > entry->average_time) {
         syslog(LOG_WARNING, "Spam level was reached for email ID: %s.", data->email_id);
         result = SPAM;
     }
 
-    if (entry->average_score > SETTINGS->super_spam_limit || 
-        entry->average_score * (1 + SETTINGS->score_percentage_super_spam) > faculty_record->average_score || 
-        entry->average_time * (1 + SETTINGS->time_percentage_super_spam) > faculty_record->average_time) {
+    float time_super_spam_limit = faculty_record->average_time * SETTINGS->time_percentage_super_spam;
+    float score_super_spam_limit = faculty_record->average_score * (1 + SETTINGS->score_percentage_super_spam);
+
+    syslog(LOG_DEBUG, "[evaluate_result_type] Starting super-spam evaluation.");
+    syslog(LOG_DEBUG, "[evaluate_result_type] Time: %.2f, Score: %.2f, Our time: %.2f, Our score: %.2f Set_limit: %.2d",
+        time_super_spam_limit, score_super_spam_limit, entry->average_time, entry->average_score, 
+        SETTINGS->super_spam_limit);
+
+    if ((entry->average_score > SETTINGS->super_spam_limit && score_super_spam_limit < entry->average_score) || 
+        time_super_spam_limit > entry->average_time) {
         syslog(LOG_WARNING, "Super-spam level was reached for email ID: %s.", data->email_id);
         result = SUPERSPAM;
     }
@@ -392,6 +413,11 @@ statistics_record_t* create_new_stat_record(char* name)
 statistics_record_t* retrieve_statistics_record(char* server_name)
 {
     syslog(LOG_DEBUG, "[retrieve_statistics_record] Retrieving statistic record for: %s", server_name);
+
+    if(server_name == NULL) {
+        syslog(LOG_DEBUG, "[retrieve_statistics_record] The faculty server was NULL, retrieving the relay node.");
+        return (STATISTICS->data)[0];
+    }
 
     for (size_t i = 0; i < STATISTICS->array_size; ++i) {
         if (!strcmp((STATISTICS->data)[i]->name, server_name)) {
@@ -936,21 +962,18 @@ sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
     }
 
     if (!strcmp(headerf, HEADER_SPAM)) { // SpamAssassin score
-        char* score_string = strstr(headerv, "score=");
-        if (score_string) {
-            char* end_ptr;
-            errno = 0;
-            float temp_spam_score = strtof(score_string + 6, &end_ptr);
+        char* end_ptr;
+        errno = 0;
+        float temp_spam_score = strtof(headerv, &end_ptr);
 
-            if (errno != 0 || end_ptr == headerv) {
-                syslog(LOG_WARNING, "[mlfi_header] Was not able to parse the SpamAssassin score. Skipping.");
-                return SMFIS_CONTINUE;
-            }
-
-            pthread_mutex_lock(&DATA_MUTEX);
-            data->spam_score = temp_spam_score;
-            pthread_mutex_unlock(&DATA_MUTEX);
+        if (errno != 0 || end_ptr == headerv) {
+            syslog(LOG_WARNING, "[mlfi_header] Was not able to parse the SpamAssassin score. Value: %s", headerv);
+            return SMFIS_CONTINUE;
         }
+
+        pthread_mutex_lock(&DATA_MUTEX);
+        data->spam_score = temp_spam_score;
+        pthread_mutex_unlock(&DATA_MUTEX);
         return SMFIS_CONTINUE;
     }
 
@@ -967,7 +990,7 @@ sfsistat mlfi_header(SMFICTX* ctx, char* headerf, char* headerv)
         int temp_counter = (int)strtol(headerv, &end_ptr, 10);
 
         if (errno != 0 || *end_ptr != '\0' || end_ptr == headerv) {
-            syslog(LOG_DEBUG, "[mlfi_header] Was not able to parse the forward counter. Skipping.");
+            syslog(LOG_DEBUG, "[mlfi_header] Was not able to parse the forward counter. Val: %s", headerv);
             return SMFIS_CONTINUE;
         }
 
@@ -1138,7 +1161,7 @@ sfsistat mlfi_eom(SMFICTX* ctx)
     if (is_blacklisted(data->sender_hostname, SETTINGS) || is_blacklisted(original_addr_from, SETTINGS)) {
         syslog(LOG_DEBUG, "[mlfi_eom] The host is on the blacklist, blocking. ID: %s.", data->email_id);
         set_header(ctx, HEADER_SPECIAL, "BLACKLISTED");
-        block_email(ctx, data, "Blacklisted host", "403", false);
+        block_email(ctx, data, "Blacklisted host", "554", false);
         goto eom_finish;
     }
 
@@ -1167,7 +1190,13 @@ sfsistat mlfi_eom(SMFICTX* ctx)
     statistics_record_t* faculty_record = retrieve_statistics_record(faculty_server_name);
     statistics_record_t* relay_record = (STATISTICS->data)[0];
     time_t t_now = time(0); // Get current timestamp
-    float email_time_diff = !faculty_record->parsed_email_counter ? 0 : fabs((float)difftime(entry->last_email, t_now));
+
+    if(entry->last_email == 0) {
+        entry->last_email = time(0); // The first email that the user sends
+    }
+
+    float email_time_diff = fabs((float)difftime(entry->last_email, t_now));
+    syslog(LOG_DEBUG, "[mlfi_eom] Difference between times: %lu / %lu -> %f", entry->last_email, t_now, email_time_diff);
 
     pthread_mutex_lock(&(DATABASE->mutex_value));
 
@@ -1178,32 +1207,35 @@ sfsistat mlfi_eom(SMFICTX* ctx)
 
     pthread_mutex_unlock(&(DATABASE->mutex_value));
 
+    syslog(LOG_DEBUG, "[mlfi_eom] Starting to apply politics. ID: %s.", data->email_id);
     result_type = evaluate_result_type(result_type, entry, faculty_record, data);
 
     // We do not want to include whitelisted or blacklisted emails in our statistics
     update_statistics(faculty_record, email_time_diff, data->spam_score, data->is_forward, result_type);
 
     // Forwarded email
-    if (result_type >= SPAM && entry->average_score * (1 + SETTINGS->forward_percentage_limit) > relay_record->average_score) {
+    if (data->is_forward && result_type >= SPAM && 
+        entry->average_score * (1 + SETTINGS->forward_percentage_limit) > relay_record->average_score) {
         syslog(LOG_WARNING, "Forwarded email from %s reached spam limit. ID: %s.", original_addr_from, data->email_id);
-        block_email(ctx, data, "Spammer access rejected", "550", false);
+        block_email(ctx, data, "Spammer access rejected", "554", false);
         goto eom_finish;
     }
 
     // Authenticated user
     if (data->is_auth && result_type >= SPAM) {
         syslog(LOG_WARNING, "Auth. user from %s reached spam level (%s).", original_addr_from, data->email_id);
-        block_email(ctx, data, "Spammer access rejected", "550", true);
+        block_email(ctx, data, "Spammer access rejected", "554", true);
         goto eom_finish;
     }
 
     // If it is a local email probably it is some kind of newsletter
-    if (result_type == SUPERSPAM && (!data->is_local || !ALLOW_NEWSLETTERS)) {
+    if (result_type >= SUPERSPAM && (!data->is_local || !ALLOW_NEWSLETTERS)) {
         syslog(LOG_WARNING, "The sender that send email %s was marked as a super-spammer.", data->email_id);
-        block_email(ctx, data, "Spammer access rejected", "550", false);
+        block_email(ctx, data, "Spammer access rejected", "554", false);
     }
 
-eom_finish:;
+    eom_finish:
+    
     set_header(ctx, HEADER_QUARANTINE, result_type == SUPERSPAM ? "Yes" : "No");
     set_header(ctx, HEADER_IS_AUTH, data->is_auth ? "Yes" : "No");
     set_header(ctx, HEADER_IS_FORWARD, data->is_forward ? "Yes" : "No");

@@ -30,8 +30,8 @@ struct settings {
     bool save_data; // DEFAULT: true
     char* database_path; // DEFAULT: ./db.data
     char* statistics_path; // DEFAULT: ./stat.data
-    int super_spam_limit; // DEFAULT: 20
-    int spam_limit; // DEFAULT: 12
+    int super_spam_limit; // DEFAULT: 6
+    int spam_limit; // DEFAULT: 2
     int milter_debug_level; // DEFAULT: 0 | MAX: 6
     int hash_table_size; // DEFAULT: 2000000
     int clean_interval; // DEFAULT: 2400 | 20 min.
