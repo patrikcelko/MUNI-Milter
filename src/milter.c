@@ -12,7 +12,7 @@
  *
  *****************************************************************************************/
 
-/*****************************************************************************************
+/********************************** MUNI - Milter ****************************************
  *
  * FILENAME:    milter.c
  * DESCRIPTION: Implementation of the Milter.
@@ -51,7 +51,7 @@ static char VERSION[] = "1.2.0";
 static char AUTHOR[] = "Patrik Celko"; // Email headers do not like 'Č'
 static char MILTER_NAME[] = "MUNI-Milter";
 static char OPTSTRING[] = "hVvdc:";
-static bool ALLOW_REPLY = true; // This can be set to true to send reply messages about quarantine
+static bool ALLOW_REPLY = false; // This can be set to true to send reply messages about quarantine
 static bool ALLOW_NEWSLETTERS = true;
 static char STATISTICS_DELIMITER[] = ";";
 
@@ -619,8 +619,7 @@ bool init_statistics()
     STATISTICS->array_size = 0;
 
     // This will represent all traffic on the MUNI relay (it will be always on index 0)
-    create_new_stat_record("Relay");
-    return (bool)(STATISTICS->data)[0];
+    return (bool) create_new_stat_record("Relay");
 }
 
 /* [Thread-Unsafe] Destroy statistic structure */
@@ -638,9 +637,9 @@ void destroy_statistics()
         free((STATISTICS->data)[i]);
     }
 
-    free(STATISTICS);
     syslog(LOG_DEBUG, "[destroy_statistics] The statistics were successfully removed from memory. Removed: %ld.",
         STATISTICS->array_size);
+    free(STATISTICS);
 }
 
 /* [Thread-Safe] Evaluate spam category for the sender and update statistics data */

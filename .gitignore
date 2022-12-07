@@ -56,3 +56,6 @@ src/milter
 
 # Config file (will be generated automatically)
 src/config.cfg
+
+# All data files
+*.data

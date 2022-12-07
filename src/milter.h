@@ -1,11 +1,25 @@
-/********************************** MUNI - Milter ***********************************
+/*****************************************************************************************
+ * Copyright [2022] [Patrik Čelko]
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this
+ * file except in compliance with the License. You may obtain a copy of the License at
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software distributed under
+ * the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the specific language governing
+ * permissions and limitations under the License.
+ *
+ *****************************************************************************************/
+
+/********************************** MUNI - Milter ****************************************
  *
  * FILENAME:    milter.h
- * DESCRIPTION: Header file for the milter.
- * NOTES:       This milter will need additional libs (settings, database) to run.
+ * DESCRIPTION: Header file for the Milter.
+ * NOTES:       This Milter will need additional libs (settings, database) to run.
  * AUTHOR:      Patrik Čelko
  *
- *************************************************************************************/
+ *****************************************************************************************/
 
 #ifndef MILTER_H
 #define MILTER_H
@@ -50,8 +64,8 @@ struct private_data {
     bool is_forward; // [mlfi_eoh] Is email forward
     bool is_local; // [mlfi_eoh] True if email travel only in the local network
     bool is_auth; // [mlfi_envfrom] True if a user is authenticated
-    bool header_quarantine; // [mlfi_header] Value from header - Was marked as dangerous email
-    int forward_counter; // [mlfi_header] How many times was email seen?
+    bool header_quarantine; // [mlfi_header] Value from header - Was marked as a dangerous email
+    int forward_counter; // [mlfi_header] How many times was the email seen?
     float spam_score; // [mlfi_header] Spam assassin score
     char* sender_hostname; // [mlfi_connect] Sender IP or DNS
     char* email_id; // [mlfi_header] Email ID
